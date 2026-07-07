@@ -26,6 +26,7 @@ class NormalizedRequest:
     request_kind: str = "turn"
     is_compaction: bool = False
     estimated_input_tokens: int = 0
+    usage_estimate: Any = None
     parallel_tool_calls: bool = True
     tool_choice: Any = "auto"
     prompt_cache_key: str | None = None
@@ -33,6 +34,10 @@ class NormalizedRequest:
     tools_summary: str = ""
     tools_catalog: str = ""
     tool_registry: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tool_history: Any = None
+    latest_tool_summary: str = ""
+    pending_tool_call_count: int = 0
+    latest_tool_failed: bool = False
 
 
 @dataclass
@@ -42,6 +47,7 @@ class BridgeToolCall:
     arguments: str
     call_type: str = "function"
     requested_name: str | None = None
+    namespace: str | None = None
 
 
 @dataclass

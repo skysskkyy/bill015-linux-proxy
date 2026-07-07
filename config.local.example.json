@@ -8,14 +8,18 @@
     "api_key": "PASTE_YOUR_KEY_HERE",
     "cookie": "",
     "user_id": "192833",
-    "timeout_seconds": 60
+    "timeout_seconds": 0
   },
-  "mode": "exploit",
+  "mode": "normal",
   "model": {
     "default": "gpt-5.5",
     "aliases": {
-      "codex-gpt55": "gpt-5.5"
-    }
+      "codex-gpt55": "gpt-5.5",
+      "codex-gpt54": "gpt-5.4",
+      "gpt-5.4": "gpt-5.4",
+      "gpt-5.5": "gpt-5.5"
+    },
+    "force_default": false
   },
   "bill015": {
     "function_name": "emit_value",
@@ -29,12 +33,31 @@
     "store_answers": true,
     "rotate_mb": 10
   },
+  "usage": {
+    "estimator": "auto",
+    "prefer_tiktoken": true,
+    "include_tools_schema": true,
+    "include_images": true,
+    "cache_ratio_default": 0.85,
+    "max_text_for_exact_tokenize": 500000,
+    "audit_breakdown": true
+  },
+  "responses_events": {
+    "fidelity_level": "native",
+    "emit_reasoning_summary": false,
+    "emit_annotations": true,
+    "allow_web_search_call_event": false,
+    "emit_incomplete_on_truncation": true,
+    "strict_sequence_numbers": true,
+    "chunk_size": 256
+  },
   "limits": {
     "max_concurrency": 2,
     "max_request_bytes": 1048576,
-    "args_done_timeout_ms": 45000,
-    "upstream_idle_timeout_ms": 15000,
-    "circuit_failures": 5
+    "args_done_timeout_ms": 0,
+    "upstream_idle_timeout_ms": 0,
+    "circuit_failures": 0,
+    "client_heartbeat_interval_ms": 5000
   },
   "admin": {
     "token": "change-me-local-admin"

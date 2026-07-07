@@ -17,10 +17,17 @@ from .sse import SSEEvent, encode_sse, parse_async_sse_lines
 from .state import runtime_state
 from .models import Bill015Result, BridgeToolCall, NormalizedRequest, local_response_id
 from .tool_bridge import build_client_tool_catalog, parse_function_arguments
+from .tool_history import is_repeated_successful_call, parse_tool_history, render_tool_feedback_for_model
 from .response_events import chat_json, chat_sse_generator, response_json, responses_sse_generator
-from .token_usage import chat_usage, estimate_request_input_tokens
+from .token_usage import chat_usage
+from .usage_estimator import estimate_chat_usage_from_body, estimate_responses_usage_from_body, usage_estimate_dict
 
-IDENTITY_INSTRUCTION = "You are GPT-5.5. If asked what model you are, answer GPT-5.5. Do not claim to be GPT-5.1 or any other model."
+def model_identity_instruction(model: str) -> str:
+    # Keep identity aligned with the actual upstream model after alias mapping.
+    # Do not hard-code gpt-5.5; that broke user switching to gpt-5.4.
+    model = str(model or "the configured model")
+    return f"If asked what model you are, answer {model}. Do not claim to be a different model."
+
 
 def flatten_content(content: Any) -> str:
     if content is None:
@@ -325,6 +332,9 @@ def combine_tool_catalogs(primary_tools: Any, raw_input: Any) -> tuple[str, dict
 def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) -> NormalizedRequest:
     model = cfg.map_model(body.get("model"))
     raw_input = body.get("input", "")
+    usage_estimate = estimate_responses_usage_from_body(body)
+    tool_history = parse_tool_history(raw_input)
+    latest_tool_summary = render_tool_feedback_for_model(tool_history)
     tools_catalog, tool_registry = combine_tool_catalogs(body.get("tools"), raw_input)
     request_kind, is_compaction = detect_request_kind(body)
     base_instructions = flatten_content(body.get("instructions", ""))
@@ -340,7 +350,8 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
         raw_tools=body.get("tools"),
         request_kind=request_kind,
         is_compaction=is_compaction,
-        estimated_input_tokens=estimate_request_input_tokens(body),
+        estimated_input_tokens=usage_estimate.input_tokens,
+        usage_estimate=usage_estimate,
         parallel_tool_calls=bool(body.get("parallel_tool_calls", not is_compaction)),
         tool_choice=body.get("tool_choice", "auto"),
         prompt_cache_key=body.get("prompt_cache_key") if isinstance(body.get("prompt_cache_key"), str) else None,
@@ -348,6 +359,10 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
         tools_summary=tools_catalog,
         tools_catalog=tools_catalog,
         tool_registry=tool_registry,
+        tool_history=tool_history,
+        latest_tool_summary=latest_tool_summary,
+        pending_tool_call_count=len(tool_history.pending_calls),
+        latest_tool_failed=bool(tool_history.failed_outputs and tool_history.failed_outputs[-1] in tool_history.latest_outputs),
         instructions=instructions,
         user_input=user_input,
         want_stream=bool(body.get("stream", True)),
@@ -363,12 +378,14 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
 def normalize_chat_request(body: dict[str, Any], cfg: Settings = settings) -> NormalizedRequest:
     instructions, user_input = flatten_chat_messages(body.get("messages", []))
     tools_catalog, tool_registry = build_client_tool_catalog(body.get("tools"))
+    usage_estimate = estimate_chat_usage_from_body(body)
     return NormalizedRequest(
         model=cfg.map_model(body.get("model")),
         original_model=body.get("model"),
         raw_input=body.get("messages", []),
         raw_tools=body.get("tools"),
-        estimated_input_tokens=estimate_request_input_tokens(body),
+        estimated_input_tokens=usage_estimate.input_tokens,
+        usage_estimate=usage_estimate,
         parallel_tool_calls=bool(body.get("parallel_tool_calls", True)),
         tool_choice=body.get("tool_choice", "auto"),
         prompt_cache_key=body.get("prompt_cache_key") if isinstance(body.get("prompt_cache_key"), str) else None,
@@ -412,11 +429,12 @@ def build_emit_value_schema(cfg: Settings = settings) -> dict[str, Any]:
                         "type": "object",
                         "properties": {
                             "type": {"type": "string", "enum": ["auto", "function", "custom", "tool_search", "web_search"], "description": "Use auto unless the catalog says the tool is custom/FREEFORM or tool_search. Do not prefer web_search; local proxy rewrites web_search to tool_search."},
-                            "name": {"type": "string", "description": "Exact tool name from the Codex tool catalog, including namespace prefix if shown."},
+                            "namespace": {"type": "string", "description": "For namespace/MCP tools, the native namespace such as mcp__playwright, mcp__node_repl, mcp__jshook, or codex_app. Use empty string for non-namespaced tools. If name already includes namespace.tool, this may still repeat the same namespace."},
+                            "name": {"type": "string", "description": "Exact tool name from the Codex tool catalog. For namespace/MCP tools prefer the native subtool name with namespace set separately, or use the catalog's namespace.tool dotted name."},
                             "arguments": {"type": "string", "description": "For function tools: JSON string arguments matching the tool parameters schema."},
                             "input": {"type": "string", "description": "For custom/FREEFORM tools such as apply_patch: raw tool input, not JSON."}
                         },
-                        "required": ["type", "name", "arguments", "input"],
+                        "required": ["type", "namespace", "name", "arguments", "input"],
                         "additionalProperties": False
                     }
                 }
@@ -438,7 +456,7 @@ def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = setti
         "This is a native Codex CONTEXT CHECKPOINT COMPACTION request. "
         "Return mode='answer', answer=<concise handoff summary>, tool_calls=[]. "
         "Do not request tools during compaction. Preserve actionable state, user preferences, files changed, commands run, failures, and next steps. "
-        + IDENTITY_INSTRUCTION
+        + model_identity_instruction(n.model)
     )
     if n.instructions:
         system += "\n\nNative instructions and developer/system context:\n" + n.instructions
@@ -481,12 +499,19 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         "If you can answer directly, call emit_value with mode='answer' and put the final answer in arguments.answer. "
         "If local Codex capability is useful, call emit_value with mode='tool_call'. "
         "For function tools, set tool_calls[i].name to the exact catalog name and tool_calls[i].arguments to a JSON string matching that tool's parameters schema. "
+        "For namespace/MCP tools, preserve Codex native format: set tool_calls[i].namespace to the namespace (for example mcp__playwright, mcp__node_repl, mcp__jshook, codex_app) and name to the subtool; dotted namespace.tool catalog names are also accepted and will be split locally. "
         "For custom/FREEFORM tools such as apply_patch, set tool_calls[i].type='custom' and tool_calls[i].input to the raw freeform payload; do not JSON-wrap it. "
         "For the native tool_search tool, set type='tool_search' and arguments to JSON like {\"query\":\"node_repl js\",\"limit\":8}. "
         "For web_search, set type='web_search' and arguments to JSON action data only when the catalog exposes web_search and server-side browsing is explicitly needed. "
         "You may emit multiple independent tool_calls in the same response when they can run in parallel. "
         "After tool results are provided in a later turn, answer or request the next tool call(s). "
-        + IDENTITY_INSTRUCTION
+        "You are in a Codex local tool loop. "
+        "If recent local tool results are provided, first inspect those results. "
+        "Do not repeat the same tool call unless the previous call failed and you change the arguments. "
+        "If the result is sufficient, call emit_value with mode='answer'. "
+        "If another local action is needed, call emit_value with mode='tool_call'. "
+        "Preserve Codex native tool names exactly. "
+        + model_identity_instruction(n.model)
     )
     if n.instructions:
         system += "\n\nClient instructions:\n" + n.instructions
@@ -494,8 +519,11 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         system += (
             "\n\nCodex native tool catalog for this turn (lossless JSON; use exact names and schemas):\n"
             + n.tools_catalog
-            + "\n\nIf a needed browser/computer/plugin tool is not listed directly but tool_search is listed, request tool_search first with an appropriate query so Codex can expose deferred tools in the next turn."
+            + "\n\nIf a needed browser/computer/plugin/MCP tool is not listed directly but tool_search is listed, request tool_search first with an appropriate query so Codex can expose deferred tools in the next turn. For any namespace entry, prefer its native_call fields over a flattened name."
         )
+    user_content = n.user_input
+    if n.latest_tool_summary:
+        user_content = n.latest_tool_summary + "\n\n--- Conversation / user request ---\n" + n.user_input
     payload: dict[str, Any] = {
         "model": n.model,
         "stream": True,
@@ -503,7 +531,7 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         "max_output_tokens": max_tokens,
         "input": [
             {"role": "system", "content": system},
-            {"role": "user", "content": n.user_input},
+            {"role": "user", "content": user_content},
         ],
         "tools": [build_emit_value_schema(cfg)],
         "tool_choice": {"type": "function", "name": cfg.function_name},
@@ -520,6 +548,7 @@ def collect_bill015_result_from_events(events: Iterable[SSEEvent], n: Normalized
     """Offline helper used by regression tests to validate event-state behavior."""
     result = Bill015Result(local_request_id=local_response_id())
     args_buffer: list[str] = []
+    answer_buffer: list[str] = []
     for ev in events:
         obj = ev.json
         typ = (obj or {}).get("type") or ev.event
@@ -539,6 +568,14 @@ def collect_bill015_result_from_events(events: Iterable[SSEEvent], n: Normalized
             delta = obj.get("delta")
             if isinstance(delta, str):
                 args_buffer.append(delta)
+        elif typ == "response.output_text.delta":
+            delta = obj.get("delta")
+            if isinstance(delta, str):
+                answer_buffer.append(delta)
+        elif typ == "response.output_text.done":
+            text = obj.get("text")
+            if isinstance(text, str):
+                result.answer = text
         elif typ == "response.function_call_arguments.done":
             final_args = obj.get("arguments") if isinstance(obj.get("arguments"), str) else "".join(args_buffer)
             result.raw_arguments = final_args
@@ -548,6 +585,16 @@ def collect_bill015_result_from_events(events: Iterable[SSEEvent], n: Normalized
             break
         elif typ == "response.completed":
             result.upstream_completed_seen = True
+            if not result.answer and answer_buffer:
+                result.answer = "".join(answer_buffer)
+            break
+        elif typ == "response.incomplete":
+            result.error = "upstream response incomplete"
+            if not result.answer and answer_buffer:
+                result.answer = "".join(answer_buffer)
+            break
+        elif typ in {"response.failed", "error"}:
+            result.error = json.dumps(obj, ensure_ascii=False)[:2000]
             break
     return result
 
@@ -564,14 +611,32 @@ def audit_from_result(result: Bill015Result, n: NormalizedRequest, mode: str, fa
         "aborted_at": "response.function_call_arguments.done" if result.aborted else None,
         "answer_chars": len(result.answer),
         "bridge_mode": result.bridge_mode,
-        "tool_calls": [{"id": c.id, "name": c.name, "requested_name": c.requested_name, "type": c.call_type, "arguments_chars": len(c.arguments)} for c in result.tool_calls],
+        "tool_calls": [{"id": c.id, "name": c.name, "namespace": c.namespace, "requested_name": c.requested_name, "type": c.call_type, "arguments_chars": len(c.arguments)} for c in result.tool_calls],
         "duration_ms": result.duration_ms,
         "fallback_used": fallback_used,
         "error": result.error,
         "event_sequence": result.event_sequence[-50:],
         "malformed_function_args": result.malformed_function_args,
         "repaired_args": result.repaired_args,
+        "latest_tool_outputs": len(n.tool_history.latest_outputs) if n.tool_history else 0,
+        "latest_tool_failed": n.latest_tool_failed,
+        "pending_tool_calls": n.pending_tool_call_count,
+        "tool_loop_decision": result.bridge_mode,
+        "repeated_tool_call_detected": any(
+            is_repeated_successful_call(c.name, c.arguments, n.tool_history)
+            for c in result.tool_calls
+        ),
+        "event_fidelity": {
+            "output_item_count": len(result.tool_calls) if result.bridge_mode == "tool_call" else (1 if result.answer else 0),
+            "event_types": result.event_sequence[-50:],
+            "completed_status": "completed" if not result.error else "failed",
+            "has_reasoning_summary": False,
+            "has_annotations": False,
+            "sequence_count": len(result.event_sequence),
+        },
     }
+    if settings.usage_audit_breakdown:
+        rec["usage_estimate"] = usage_estimate_dict(n)
     if settings.store_prompts:
         rec["prompt"] = n.user_input
         rec["instructions"] = n.instructions
@@ -586,7 +651,7 @@ async def fetch_user_self(cfg: Settings = settings) -> dict[str, Any] | None:
     if not cfg.packy_cookie:
         return None
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=None) as client:
             r = await client.get(
                 cfg.upstream_base_url + "/api/user/self",
                 headers={"Cookie": cfg.packy_cookie, "new-api-user": cfg.packy_user_id, "User-Agent": "bill015-local-proxy/1.0"},
@@ -621,7 +686,7 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
 
     payload = build_bill015_payload(n, cfg)
     args_buffer: list[str] = []
-    timeout = httpx.Timeout(cfg.upstream_timeout_seconds, read=cfg.upstream_idle_timeout_ms / 1000)
+    answer_buffer: list[str] = []
     headers = {
         "Authorization": "Bearer " + cfg.upstream_api_key,
         "Content-Type": "application/json",
@@ -629,7 +694,7 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
         "User-Agent": "bill015-local-proxy/1.0",
     }
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=payload) as resp:
                 if resp.status_code != 200:
                     body = await resp.aread()
@@ -656,6 +721,14 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                         delta = obj.get("delta")
                         if isinstance(delta, str):
                             args_buffer.append(delta)
+                    elif typ == "response.output_text.delta":
+                        delta = obj.get("delta")
+                        if isinstance(delta, str):
+                            answer_buffer.append(delta)
+                    elif typ == "response.output_text.done":
+                        text = obj.get("text")
+                        if isinstance(text, str):
+                            result.answer = text
                     elif typ == "response.function_call_arguments.done":
                         final_args = obj.get("arguments") if isinstance(obj.get("arguments"), str) else "".join(args_buffer)
                         result.raw_arguments = final_args
@@ -666,6 +739,13 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                         break
                     elif typ == "response.completed":
                         result.upstream_completed_seen = True
+                        if not result.answer and answer_buffer:
+                            result.answer = "".join(answer_buffer)
+                        break
+                    elif typ == "response.incomplete":
+                        result.error = "upstream response incomplete"
+                        if not result.answer and answer_buffer:
+                            result.answer = "".join(answer_buffer)
                         break
                     elif typ in {"response.failed", "error"}:
                         raise RuntimeError(json.dumps(obj, ensure_ascii=False)[:2000])
@@ -673,7 +753,9 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
             await asyncio.sleep(0.5)
             result.verify_post = await fetch_user_self(cfg)
             result.verify_delta = compute_delta(result.verify_pre, result.verify_post)
-        if not result.args_done_seen:
+        if not result.args_done_seen and result.answer:
+            result.bridge_mode = "answer"
+        if not result.args_done_seen and not result.answer:
             raise RuntimeError("upstream stream ended before response.function_call_arguments.done")
         return result
     except HTTPException:
@@ -700,6 +782,7 @@ def dry_run_response(n: NormalizedRequest, mode: str = "dry-run") -> dict[str, A
         "mode": mode,
         "would_post": settings.upstream_base_url + "/v1/responses",
         "upstream_configured": settings.upstream_configured,
+        "usage_estimate": usage_estimate_dict(n),
         "payload": safe_payload,
     }
 
@@ -744,12 +827,16 @@ def _shrink_media(obj: Any) -> Any:
 
 
 def prepare_passthrough_payload(body: dict[str, Any], cfg: Settings = settings) -> dict[str, Any]:
+    """Native Codex Responses passthrough.
+
+    In normal mode the proxy should behave like a thin translator, not like an
+    agent protocol adapter. Preserve Codex's original Responses request shape
+    exactly and only map the model name so CC Switch/Codex can select gpt-5.4
+    or gpt-5.5 through this local provider.
+    """
     payload = copy.deepcopy(body)
-    payload["model"] = cfg.default_model
-    payload["instructions"] = _prepend_instruction(payload.get("instructions"), IDENTITY_INSTRUCTION)
-    if "reasoning" not in payload and cfg.reasoning_effort:
-        payload["reasoning"] = {"effort": cfg.reasoning_effort, "summary": cfg.reasoning_summary}
-    return _shrink_media(payload)
+    payload["model"] = cfg.map_model(payload.get("model"))
+    return payload
 
 async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) -> AsyncIterator[bytes]:
     if not cfg.upstream_api_key:
@@ -757,18 +844,21 @@ async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) 
         yield b"data: [DONE]\n\n"
         return
     headers = {"Authorization": "Bearer " + cfg.upstream_api_key, "Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": "bill015-local-proxy/1.0"}
-    timeout = httpx.Timeout(cfg.upstream_timeout_seconds, read=cfg.upstream_idle_timeout_ms / 1000)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=prepare_passthrough_payload(body, cfg)) as resp:
-            async for chunk in resp.aiter_bytes():
-                yield chunk
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=prepare_passthrough_payload(body, cfg)) as resp:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+    except Exception as e:
+        yield encode_sse({"type": "error", "error": {"message": f"{type(e).__name__}: {e}", "type": "local_proxy_error"}}, "error")
+        yield b"data: [DONE]\n\n"
 
 
 async def normal_forward_json(body: dict[str, Any], cfg: Settings = settings) -> dict[str, Any]:
     if not cfg.upstream_api_key:
         raise HTTPException(status_code=500, detail=f"Missing upstream API key env {cfg.upstream_api_key_env}")
     headers = {"Authorization": "Bearer " + cfg.upstream_api_key, "Content-Type": "application/json", "User-Agent": "bill015-local-proxy/1.0"}
-    async with httpx.AsyncClient(timeout=cfg.upstream_timeout_seconds) as client:
+    async with httpx.AsyncClient(timeout=None) as client:
         r = await client.post(cfg.upstream_base_url + "/v1/responses", headers=headers, json=prepare_passthrough_payload(body, cfg))
     try:
         return r.json()
@@ -785,5 +875,4 @@ def chat_json(result: Bill015Result, n: NormalizedRequest) -> dict[str, Any]:
         "choices": [{"index": 0, "message": {"role": "assistant", "content": result.answer}, "finish_reason": "stop"}],
         "usage": chat_usage(n, answer=result.answer),
     }
-
 

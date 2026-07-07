@@ -44,7 +44,7 @@ semaphore = asyncio.Semaphore(settings.max_concurrency)
 def active_mode() -> str:
     snap = runtime_state.snapshot()
     mode = snap.get("mode_override") or settings.mode
-    if mode in {"exploit", "verify"} and snap.get("consecutive_failures", 0) >= settings.circuit_failures:
+    if settings.circuit_failures > 0 and mode in {"exploit", "verify"} and snap.get("consecutive_failures", 0) >= settings.circuit_failures:
         return "circuit-open"
     return mode
 

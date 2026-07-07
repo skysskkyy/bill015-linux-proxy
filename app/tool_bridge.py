@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
@@ -23,6 +24,20 @@ def _register_tool_alias(registry: dict[str, dict[str, Any]], alias: str, spec: 
     key = alias.lower()
     if replace or key not in registry:
         registry[key] = spec
+        return
+    current = registry.get(key) or {}
+    if (
+        current.get("namespace") != spec.get("namespace")
+        or current.get("output_name") != spec.get("output_name")
+    ):
+        # Bare subtool names can collide across multiple MCP namespaces. Keep
+        # the first mapping for backward compatibility, but mark it so the
+        # system prompt and audit trail can diagnose ambiguous unqualified
+        # calls. Qualified names (namespace.tool / namespace__tool / explicit
+        # namespace field) always resolve losslessly.
+        current["ambiguous_alias"] = True
+        current.setdefault("ambiguous_with", [])
+        current["ambiguous_with"].append({"namespace": spec.get("namespace"), "name": spec.get("output_name")})
 
 
 def build_client_tool_catalog(tools: Any, max_chars: int = 120_000) -> tuple[str, dict[str, dict[str, Any]]]:
@@ -85,7 +100,10 @@ def _namespace_tool_doc(
         call_type = "custom" if sub_typ == "custom" else "function"
         sub_doc = {
             "name": full_name,
+            "namespace": ns_name,
+            "native_name": sub_name,
             "aliases": [sub_name, f"{ns_name}__{sub_name}"],
+            "native_call": {"namespace": ns_name, "name": sub_name},
             "type": sub_typ,
             "description": sub.get("description") or "",
             "strict": sub.get("strict", False),
@@ -94,10 +112,14 @@ def _namespace_tool_doc(
         if "format" in sub:
             sub_doc["format"] = sub.get("format")
         ns_entry["tools"].append(_compact_tool_doc(sub_doc))
-        spec = {"call_type": call_type, "output_name": full_name, "raw_type": sub_typ, "namespace": ns_name, "schema": sub}
+        # Native Codex function_call items for namespace tools use
+        # {"namespace": ns_name, "name": sub_name}; the dotted name is only a
+        # catalog/LLM hint. Register every alias but always emit the native
+        # split form to Codex.
+        spec = {"call_type": call_type, "output_name": sub_name, "raw_type": sub_typ, "namespace": ns_name, "schema": sub}
         _register_tool_alias(registry, full_name, spec, replace=True)
         _register_tool_alias(registry, f"{ns_name}__{sub_name}", spec)
-        _register_tool_alias(registry, sub_name, {**spec, "output_name": sub_name})
+        _register_tool_alias(registry, sub_name, spec)
     return _compact_tool_doc(ns_entry)
 
 
@@ -177,13 +199,19 @@ def _local_tool_search_arguments(call: dict[str, Any]) -> str:
 
 def resolve_bridge_tool_call(call: dict[str, Any], tool_registry: dict[str, dict[str, Any]] | None = None) -> BridgeToolCall | None:
     raw_name = str(call.get("name") or "").strip()
+    raw_namespace = str(call.get("namespace") or "").strip()
     if not raw_name:
         return None
 
     requested_type = str(call.get("type") or call.get("call_type") or "auto").lower()
-    spec = (tool_registry or {}).get(raw_name.lower()) or {}
+    registry = tool_registry or {}
+    spec = _resolve_tool_spec(raw_name, raw_namespace, registry)
+    fallback_namespace, fallback_name = _split_namespace_name(raw_name, raw_namespace)
+    if raw_namespace:
+        fallback_namespace = raw_namespace
     call_type = requested_type if requested_type in {"function", "custom", "tool_search", "web_search"} else str(spec.get("call_type") or "function")
-    output_name = str(spec.get("output_name") or raw_name)
+    output_name = str(spec.get("output_name") or fallback_name or raw_name)
+    namespace = str(spec.get("namespace") or fallback_namespace or "") or None
 
     if spec.get("raw_type") == "custom" or output_name == "apply_patch" or raw_name == "apply_patch":
         call_type = "custom"
@@ -204,7 +232,65 @@ def resolve_bridge_tool_call(call: dict[str, Any], tool_registry: dict[str, dict
         arguments=arguments,
         call_type=call_type,
         requested_name=raw_name,
+        namespace=namespace,
     )
+
+
+def _resolve_tool_spec(raw_name: str, raw_namespace: str, registry: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Resolve catalog aliases for ordinary and namespace/MCP tools.
+
+    Codex native namespace calls use split fields:
+    {"namespace":"mcp__node_repl","name":"js"}. The upstream bridge model may
+    instead emit mcp__node_repl.js or mcp__node_repl__js because those are the
+    safest unambiguous hints in our text catalog. Accept all three forms.
+    """
+    candidates: list[str] = []
+    if raw_namespace:
+        candidates.extend([f"{raw_namespace}.{raw_name}", f"{raw_namespace}__{raw_name}"])
+    candidates.append(raw_name)
+
+    split_namespace, split_name = _split_namespace_name(raw_name, raw_namespace)
+    if split_namespace and split_name:
+        candidates.extend([f"{split_namespace}.{split_name}", f"{split_namespace}__{split_name}", split_name])
+
+    for candidate in candidates:
+        spec = registry.get(candidate.lower())
+        if spec:
+            return spec
+    return {}
+
+
+def _split_namespace_name(raw_name: str, raw_namespace: str = "") -> tuple[str | None, str | None]:
+    """Best-effort namespace split used when a tool was not in the registry.
+
+    This keeps future MCP servers working even before their metadata is seen:
+    - mcp__playwright.browser_tabs -> (mcp__playwright, browser_tabs)
+    - mcp__node_repl__js          -> (mcp__node_repl, js)
+    - codex_app.read_thread_terminal -> (codex_app, read_thread_terminal)
+    """
+    raw_name = (raw_name or "").strip()
+    raw_namespace = (raw_namespace or "").strip()
+    if raw_namespace:
+        return raw_namespace, raw_name
+    if "." in raw_name:
+        ns, name = raw_name.rsplit(".", 1)
+        if ns and name and _looks_like_namespace(ns):
+            return ns, name
+    # MCP server names themselves start with mcp__ and the namespace/tool
+    # separator is the final double-underscore.
+    if raw_name.startswith("mcp__") and "__" in raw_name.removeprefix("mcp__"):
+        ns, name = raw_name.rsplit("__", 1)
+        if ns and name:
+            return ns, name
+    return None, raw_name
+
+
+def _looks_like_namespace(value: str) -> bool:
+    if value.startswith("mcp__"):
+        return True
+    if value in {"codex_app", "multi_tool_use", "functions", "tool_search"}:
+        return True
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", value or ""))
 
 
 def _custom_input(call: dict[str, Any]) -> str:
