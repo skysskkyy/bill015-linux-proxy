@@ -1,0 +1,42 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "upstream": {
+    "base_url": "https://packyapi.com",
+    "api_key": "PASTE_YOUR_KEY_HERE",
+    "cookie": "",
+    "user_id": "192833",
+    "timeout_seconds": 60
+  },
+  "mode": "exploit",
+  "model": {
+    "default": "gpt-5.5",
+    "aliases": {
+      "codex-gpt55": "gpt-5.5"
+    }
+  },
+  "bill015": {
+    "function_name": "emit_value",
+    "answer_field": "answer",
+    "max_output_tokens": 2048,
+    "max_answer_chars": 16384
+  },
+  "logging": {
+    "dir": "S:\\hack\\packyapi.com\\bill015_local_proxy\\proxy_evidence",
+    "store_prompts": false,
+    "store_answers": true,
+    "rotate_mb": 10
+  },
+  "limits": {
+    "max_concurrency": 2,
+    "max_request_bytes": 1048576,
+    "args_done_timeout_ms": 45000,
+    "upstream_idle_timeout_ms": 15000,
+    "circuit_failures": 5
+  },
+  "admin": {
+    "token": "change-me-local-admin"
+  }
+}
