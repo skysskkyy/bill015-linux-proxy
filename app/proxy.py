@@ -519,7 +519,7 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         system += (
             "\n\nCodex native tool catalog for this turn (lossless JSON; use exact names and schemas):\n"
             + n.tools_catalog
-            + "\n\nIf a needed browser/computer/plugin/MCP tool is not listed directly but tool_search is listed, request tool_search first with an appropriate query so Codex can expose deferred tools in the next turn. For any namespace entry, prefer its native_call fields over a flattened name."
+            + "\n\nIf a needed browser/computer/plugin/MCP tool is not listed directly but tool_search is listed, request tool_search first with a broad query. For browser/session work prefer queries containing: playwright browser navigate evaluate tabs network requests cookies localStorage sessionStorage DOM JavaScript; chrome browser current tab cookies localStorage; node_repl js; jshook call_tool route_tool activate_tools hook network intercept memory. The local proxy may add extra broad tool_search calls to expose deferred native Codex tools. For any namespace entry, prefer its native_call fields over a flattened name."
         )
     user_content = n.user_input
     if n.latest_tool_summary:

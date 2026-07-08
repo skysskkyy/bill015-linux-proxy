@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 from typing import Any, Awaitable
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -30,7 +31,17 @@ from .proxy import (
 )
 from .state import runtime_state
 
-app = FastAPI(title="BILL-015 Local Codex Proxy", version="0.1.0")
+
+def project_version() -> str:
+    try:
+        return (Path(__file__).resolve().parents[1] / "VERSION").read_text(encoding="utf-8").strip() or "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+PROJECT_VERSION = project_version()
+
+app = FastAPI(title="BILL-015 Local Codex Proxy", version=PROJECT_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -117,13 +128,14 @@ async def synthetic_result(answer: str, n: NormalizedRequest) -> Bill015Result:
 
 @app.get("/")
 async def root() -> dict[str, Any]:
-    return {"service": "bill015-local-proxy", "health": "/healthz", "models": "/v1/models"}
+    return {"service": "bill015-local-proxy", "version": PROJECT_VERSION, "health": "/healthz", "models": "/v1/models"}
 
 
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     return {
         "ok": True,
+        "version": PROJECT_VERSION,
         "mode": active_mode(),
         "configured_mode": settings.mode,
         "upstream_base_url": settings.upstream_base_url,

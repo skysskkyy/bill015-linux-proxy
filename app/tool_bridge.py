@@ -314,6 +314,82 @@ def _function_arguments(call: dict[str, Any]) -> str:
     return json.dumps({"input": value}, ensure_ascii=False)
 
 
+
+def _tool_search_query(call: BridgeToolCall) -> str:
+    try:
+        obj = json.loads(call.arguments or "{}")
+        if isinstance(obj, dict):
+            return str(obj.get("query") or obj.get("input") or "")
+    except Exception:
+        pass
+    return str(call.arguments or "")
+
+
+def _make_tool_search_call(query: str, limit: int = 20) -> BridgeToolCall:
+    return BridgeToolCall(
+        id="call_" + uuid.uuid4().hex[:24],
+        name="tool_search",
+        arguments=json.dumps({"query": query, "limit": limit}, ensure_ascii=False, separators=(",", ":")),
+        call_type="tool_search",
+        requested_name="tool_search:auto_expand",
+    )
+
+
+def expand_deferred_tool_searches(
+    calls: list[BridgeToolCall],
+    tool_registry: dict[str, dict[str, Any]] | None = None,
+) -> list[BridgeToolCall]:
+    """Ask native Codex tool_search to expose richer deferred MCP tools.
+
+    In exploit/emit_value mode the upstream model does not participate in
+    Codex's native deferred-tool search loop directly. A narrow query such as
+    "Playwright" often exposes only tabs/network tools. When a turn is clearly
+    about browser/MCP/jshook/node tooling, append several broad native
+    tool_search calls so Codex reveals the same families of tools it would make
+    discoverable in a normal session.
+    """
+    if not calls:
+        return calls
+    registry = tool_registry or {}
+    if registry and "tool_search" not in registry:
+        return calls
+
+    existing_searches = [c for c in calls if c.call_type == "tool_search" or c.name == "tool_search"]
+    namespace_calls = [c for c in calls if (c.namespace or "").startswith("mcp__") or c.namespace == "codex_app"]
+    if not existing_searches and not namespace_calls:
+        return calls
+
+    combined = " ".join(_tool_search_query(c).lower() for c in existing_searches)
+    combined += " " + " ".join(((c.namespace or "") + " " + c.name).lower() for c in namespace_calls)
+    trigger_words = (
+        "browser", "playwright", "chrome", "jshook", "mcp", "node", "node_repl",
+        "cookie", "localstorage", "sessionstorage", "dom", "javascript", "network",
+        "tab", "authenticated", "login", "current page", "web", "hook", "memory",
+        "浏览器", "页面", "登录", "工具", "cookie",
+    )
+    if combined.strip() and not any(word in combined for word in trigger_words):
+        return calls
+
+    broad_queries = [
+        "playwright browser navigate evaluate tabs network requests cookies localStorage sessionStorage DOM JavaScript current page",
+        "chrome browser current tab cookies localStorage sessionStorage evaluate JavaScript network requests authenticated session",
+        "node_repl js playwright chrome browser fetch HTTP DOM localStorage cookie automation",
+        "jshook call_tool route_tool activate_tools browser hook network intercept memory coverage runtime JavaScript",
+        "computer use screenshot click type browser window desktop automation",
+    ]
+    seen = {_tool_search_query(c).strip().lower() for c in existing_searches}
+    out = list(calls)
+    for query in broad_queries:
+        if query.lower() in seen:
+            continue
+        out.append(_make_tool_search_call(query))
+        seen.add(query.lower())
+        # Cap added discovery calls. One original + five broad searches is enough
+        # to reveal Browser/Chrome/Node/jshook families without flooding Codex.
+        if sum(1 for c in out if c.call_type == "tool_search" or c.name == "tool_search") >= 6:
+            break
+    return out
+
 def parse_function_arguments(
     raw: str,
     cfg: Settings = settings,
@@ -329,6 +405,7 @@ def parse_function_arguments(
             resolved = resolve_bridge_tool_call(call, tool_registry)
             if resolved:
                 tool_calls.append(resolved)
+        tool_calls = expand_deferred_tool_searches(tool_calls, tool_registry)
         if not tool_calls:
             mode = "answer"
             answer = "[local proxy] tool_call mode requested but no valid tool_calls were provided."

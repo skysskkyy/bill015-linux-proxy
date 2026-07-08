@@ -212,10 +212,14 @@ def main() -> None:
             {"type": "function", "namespace": "", "name": "mcp__node_repl__js", "arguments": "{\"code\":\"1+1\"}", "input": ""},
         ],
     }), tool_registry=registry | {"mcp__node_repl.js": {"call_type": "function", "output_name": "js", "namespace": "mcp__node_repl", "raw_type": "function"}})
+    mcp_pairs = [(c.namespace, c.name) for c in mcp_calls if c.call_type != "tool_search"]
+    mcp_search_queries = "\n".join(c.arguments for c in mcp_calls if c.call_type == "tool_search")
     assert_true(
         mcp_mode == "tool_call"
-        and [(c.namespace, c.name) for c in mcp_calls] == [("mcp__playwright", "browser_tabs"), ("mcp__jshook", "call_tool"), ("mcp__node_repl", "js")],
-        "generic MCP namespace parser failed",
+        and mcp_pairs == [("mcp__playwright", "browser_tabs"), ("mcp__jshook", "call_tool"), ("mcp__node_repl", "js")]
+        and "playwright browser navigate evaluate" in mcp_search_queries
+        and "jshook call_tool" in mcp_search_queries,
+        "generic MCP namespace parser/deferred expansion failed",
     )
     _, _, _, web_rewrite_mode, web_rewrite_calls = parse_function_arguments(json.dumps({
         "mode":"tool_call",
@@ -223,6 +227,13 @@ def main() -> None:
         "tool_calls":[{"type":"web_search","name":"web_search","arguments":"{\"query\":\"QuantumNous new-api responses compact\"}","input":""}],
     }), tool_registry=registry)
     assert_true(web_rewrite_mode == "tool_call" and web_rewrite_calls[0].call_type == "tool_search" and web_rewrite_calls[0].name == "tool_search" and "local web search" in web_rewrite_calls[0].arguments, "web_search was not rewritten to local tool_search")
+    browser_answer, _, _, browser_mode, browser_calls = parse_function_arguments(json.dumps({
+        "mode":"tool_call",
+        "answer":"",
+        "tool_calls":[{"type":"tool_search","name":"tool_search","arguments":"{\"query\":\"Playwright browser cookies DOM network tools\",\"limit\":8}","input":""}],
+    }), tool_registry=registry)
+    browser_queries = "\n".join(c.arguments for c in browser_calls if c.call_type == "tool_search")
+    assert_true(browser_mode == "tool_call" and len([c for c in browser_calls if c.call_type == "tool_search"]) >= 3 and "node_repl" in browser_queries and "jshook" in browser_queries, "browser/MCP tool_search expansion failed")
     deferred_n = normalize_responses_request({"model":"gpt-5.5","input":[{"type":"tool_search_output","call_id":"call_ts","status":"completed","execution":"client","tools":[{"type":"namespace","name":"mcp__node_repl","tools":[{"type":"function","name":"js","parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":False}}]}]}],"tools":tools})
     assert_true("mcp__node_repl.js" in deferred_n.tools_catalog and "js" in deferred_n.tool_registry, "deferred tool_search_output tools not cataloged")
     assert_true("mcp__node_repl.js" in deferred_n.latest_tool_summary, "deferred tools missing from tool feedback")
