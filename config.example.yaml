@@ -1,3 +1,4 @@
+# Reference only. The running proxy reads config.local.json by default.
 server:
   host: 127.0.0.1
   port: 8787
@@ -7,7 +8,7 @@ server:
 upstream:
   base_url: https://packyapi.com
   api_key_env: PACKY_API_KEY
-  timeout_seconds: 60
+  timeout_seconds: 120
 
 mode: exploit
 
@@ -15,26 +16,51 @@ model:
   default: gpt-5.5
   aliases:
     codex-gpt55: gpt-5.5
+    codex-gpt54: gpt-5.4
+  force_default: false
 
 bill015:
   function_name: emit_value
   answer_field: answer
-  abort_on_event: response.function_call_arguments.done
-  require_function_seen: true
-  require_args_done: true
   max_output_tokens: 2048
   max_answer_chars: 16384
 
 logging:
   dir: S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence
-  redact_api_keys: true
   store_prompts: false
-  store_answers: true
+  store_answers: false
   rotate_mb: 10
+
+usage:
+  estimator: auto
+  prefer_tiktoken: true
+  include_tools_schema: true
+  include_images: true
+  cache_ratio_default: 0.85
+  max_text_for_exact_tokenize: 500000
+  audit_breakdown: true
+
+responses_events:
+  fidelity_level: native
+  emit_reasoning_summary: false
+  emit_annotations: true
+  allow_web_search_call_event: false
+  emit_incomplete_on_truncation: true
+  strict_sequence_numbers: true
+  chunk_size: 256
+
+tool_bridge:
+  # Keep true for backward compatibility. Set false to drop model-requested tools
+  # that are not present in the current Codex tool catalog.
+  allow_unknown_tools: true
 
 limits:
   max_concurrency: 2
   max_request_bytes: 1048576
-  args_done_timeout_ms: 45000
-  upstream_idle_timeout_ms: 15000
-  circuit_failures: 5
+  args_done_timeout_ms: 60000
+  upstream_idle_timeout_ms: 30000
+  circuit_failures: 0
+  client_heartbeat_interval_ms: 5000
+
+admin:
+  token: change-me-local-admin

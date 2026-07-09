@@ -136,4 +136,4 @@ curl.exe -X POST http://127.0.0.1:8787/v1/responses -H "Content-Type: applicatio
 S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 ```
 
-日志不记录完整上游 API key/Cookie；默认不记录 prompt，默认记录 answer（可在 `config.local.json` 里将 `logging.store_answers` 改为 `false`）。
+日志不记录完整上游 API key/Cookie；默认不记录 prompt，也默认不记录 answer；如需本地留存回答，可在 `config.local.json` 里将 `logging.store_answers` 改为 `true`。

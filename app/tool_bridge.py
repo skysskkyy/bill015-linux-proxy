@@ -197,7 +197,11 @@ def _local_tool_search_arguments(call: dict[str, Any]) -> str:
     return json.dumps({"query": local_query, "limit": 8}, ensure_ascii=False, separators=(",", ":"))
 
 
-def resolve_bridge_tool_call(call: dict[str, Any], tool_registry: dict[str, dict[str, Any]] | None = None) -> BridgeToolCall | None:
+def resolve_bridge_tool_call(
+    call: dict[str, Any],
+    tool_registry: dict[str, dict[str, Any]] | None = None,
+    cfg: Settings = settings,
+) -> BridgeToolCall | None:
     raw_name = str(call.get("name") or "").strip()
     raw_namespace = str(call.get("namespace") or "").strip()
     if not raw_name:
@@ -206,6 +210,8 @@ def resolve_bridge_tool_call(call: dict[str, Any], tool_registry: dict[str, dict
     requested_type = str(call.get("type") or call.get("call_type") or "auto").lower()
     registry = tool_registry or {}
     spec = _resolve_tool_spec(raw_name, raw_namespace, registry)
+    if not spec and not cfg.tool_bridge_allow_unknown_tools:
+        return None
     fallback_namespace, fallback_name = _split_namespace_name(raw_name, raw_namespace)
     if raw_namespace:
         fallback_namespace = raw_namespace
@@ -431,7 +437,7 @@ def _load_arguments_object(raw: str) -> tuple[dict[str, Any], bool, bool]:
         obj = json.loads(repaired_raw[: last + 1])
         if not isinstance(obj, dict):
             raise ValueError("function arguments JSON is not an object") from None
-        return obj, False, True
+        return obj, True, True
 
 
 def _iter_call_objects(calls: Any) -> list[dict[str, Any]]:

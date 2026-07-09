@@ -2,6 +2,22 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.2.2] - 2026-07-10
+
+### Fixed
+- Preserve upstream non-2xx status codes for non-stream normal Responses forwarding.
+- Mark repaired malformed `emit_value` arguments as both malformed and repaired in audit state.
+- Expand audit redaction for common token, secret, cookie, and password key names.
+
+### Changed
+- Safer default timeout values for upstream total, idle, and `arguments.done` waits.
+- Default audit behavior no longer stores assistant answers unless explicitly enabled.
+- Aligned JSON/YAML example configs with the current runtime behavior and added a tool-bridge strict-mode switch.
+- Removed unused upstream media-shrinking helpers from the forwarding path.
+
+### Tests
+- Added focused regression tests for argument repair flags, upstream error status preservation, secret-key redaction, and strict tool-bridge behavior.
+
 ## [0.2.1] - 2026-07-08
 
 ### Added

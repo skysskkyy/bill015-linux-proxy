@@ -16,12 +16,36 @@ SECRET_PATTERNS = [
     re.compile(r"(?i)(cookie\s*[:=]\s*)[^\s,;]{12,}"),
 ]
 
+SECRET_KEY_NAMES = {
+    "authorization",
+    "cookie",
+    "api_key",
+    "token",
+    "access_token",
+    "refresh_token",
+    "session",
+    "secret",
+    "password",
+    "admin_token",
+}
+
+
+def _is_secret_key(key: str) -> bool:
+    key = str(key or "").lower()
+    return (
+        key in SECRET_KEY_NAMES
+        or key.endswith("_token")
+        or key.endswith("_secret")
+        or key.endswith("_password")
+        or key.endswith("_cookie")
+    )
+
 
 def redact(value: Any) -> Any:
     if value is None:
         return None
     if isinstance(value, dict):
-        return {k: ("<redacted>" if k.lower() in {"authorization", "cookie", "api_key", "token"} else redact(v)) for k, v in value.items()}
+        return {k: ("<redacted>" if _is_secret_key(str(k)) else redact(v)) for k, v in value.items()}
     if isinstance(value, list):
         return [redact(v) for v in value]
     if not isinstance(value, str):

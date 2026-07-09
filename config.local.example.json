@@ -10,7 +10,7 @@
     "api_key": "PASTE_YOUR_KEY_HERE",
     "cookie": "",
     "user_id": "192833",
-    "timeout_seconds": 0
+    "timeout_seconds": 120
   },
   "mode": "exploit",
   "model": {
@@ -32,7 +32,7 @@
   "logging": {
     "dir": "S:\\hack\\packyapi.com\\bill015_local_proxy\\proxy_evidence",
     "store_prompts": false,
-    "store_answers": true,
+    "store_answers": false,
     "rotate_mb": 10
   },
   "usage": {
@@ -56,12 +56,15 @@
   "limits": {
     "max_concurrency": 2,
     "max_request_bytes": 1048576,
-    "args_done_timeout_ms": 0,
-    "upstream_idle_timeout_ms": 0,
+    "args_done_timeout_ms": 60000,
+    "upstream_idle_timeout_ms": 30000,
     "circuit_failures": 0,
     "client_heartbeat_interval_ms": 5000
   },
   "admin": {
     "token": "change-me-local-admin"
+  },
+  "tool_bridge": {
+    "allow_unknown_tools": true
   }
 }

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import copy
-import io
 import json
 import time
 from typing import Any, AsyncIterator, Iterable
@@ -286,42 +284,6 @@ def dry_run_response(n: NormalizedRequest, mode: str = "dry-run") -> dict[str, A
         "payload": safe_payload,
     }
 
-def _prepend_instruction(existing: Any, extra: str) -> str:
-    if isinstance(existing, str) and existing.strip():
-        if extra in existing:
-            return existing
-        return extra + "\n\n" + existing
-    return extra
-
-def _compress_data_url(value: str, max_bytes: int = 900_000) -> str:
-    if not value.startswith("data:image/") or ";base64," not in value or len(value) <= max_bytes:
-        return value
-    header, b64 = value.split(",", 1)
-    try:
-        raw = base64.b64decode(b64, validate=False)
-        try:
-            from PIL import Image  # type: ignore
-        except Exception:
-            return "[image omitted by local proxy: data URL too large and Pillow unavailable]"
-        img = Image.open(io.BytesIO(raw))
-        img.thumbnail((1280, 1280))
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=72, optimize=True)
-        return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode("ascii")
-    except Exception:
-        return "[image omitted by local proxy: failed to compress large data URL]"
-
-def _shrink_media(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return {k: _shrink_media(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_shrink_media(v) for v in obj]
-    if isinstance(obj, str):
-        return _compress_data_url(obj)
-    return obj
-
 def prepare_passthrough_payload(body: dict[str, Any], cfg: Settings = settings) -> dict[str, Any]:
     """Native Codex Responses passthrough.
 
@@ -361,6 +323,9 @@ async def normal_forward_json(body: dict[str, Any], cfg: Settings = settings) ->
     async with httpx.AsyncClient(timeout=_http_timeout(cfg)) as client:
         r = await client.post(cfg.upstream_base_url + "/v1/responses", headers=headers, json=prepare_passthrough_payload(body, cfg))
     try:
-        return r.json()
+        obj = r.json()
     except Exception as e:
         raise HTTPException(status_code=502, detail={"upstream_status": r.status_code, "body": r.text[:2000]}) from e
+    if r.status_code < 200 or r.status_code >= 300:
+        raise HTTPException(status_code=r.status_code, detail={"upstream_status": r.status_code, "body": obj})
+    return obj
