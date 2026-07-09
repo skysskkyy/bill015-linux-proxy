@@ -5,14 +5,12 @@ import hashlib
 import io
 import json
 import math
-import re
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from typing import Any
 
 from .config import settings
 from .models import BridgeToolCall
-
 
 MESSAGE_OVERHEAD = 8
 CONTENT_PART_OVERHEAD = 2

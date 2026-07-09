@@ -87,6 +87,14 @@ python scripts/selftest.py
 
 自检只调用本地 FastAPI TestClient，不请求上游，不需要 API key。
 
+如需运行完整测试/静态检查，先安装开发依赖：
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m ruff check app scripts tests
+```
+
 ## 模式
 
 - `exploit`：强制 function-call，收到 `response.function_call_arguments.done` 后关闭上游，再本地重组 Responses 输出。

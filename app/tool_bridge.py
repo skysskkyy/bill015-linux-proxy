@@ -421,7 +421,7 @@ def _load_arguments_object(raw: str) -> tuple[dict[str, Any], bool, bool]:
     try:
         obj = json.loads(raw)
         if not isinstance(obj, dict):
-            raise ValueError("function arguments JSON is not an object")
+            raise ValueError("function arguments JSON is not an object") from None
         return obj, False, False
     except Exception:
         repaired_raw = raw.strip()
@@ -430,7 +430,7 @@ def _load_arguments_object(raw: str) -> tuple[dict[str, Any], bool, bool]:
             raise
         obj = json.loads(repaired_raw[: last + 1])
         if not isinstance(obj, dict):
-            raise ValueError("function arguments JSON is not an object")
+            raise ValueError("function arguments JSON is not an object") from None
         return obj, False, True
 
 

@@ -1,7 +1,9 @@
 {
   "server": {
     "host": "127.0.0.1",
-    "port": 8787
+    "port": 8787,
+    "cors_allow_origins": [],
+    "cors_allow_origin_regex": "^https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?$"
   },
   "upstream": {
     "base_url": "https://packyapi.com",

@@ -82,11 +82,22 @@ def _cfg_dict(path: str, default: Dict[str, str]) -> Dict[str, str]:
     return dict(default)
 
 
+def _cfg_list(path: str, default: list[str]) -> list[str]:
+    val = _cfg(path, default)
+    if isinstance(val, list):
+        return [str(v) for v in val if str(v).strip()]
+    if isinstance(val, str) and val.strip():
+        return [part.strip() for part in val.split(",") if part.strip()]
+    return list(default)
+
+
 @dataclass
 class Settings:
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
     host: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_HOST", "server.host", "127.0.0.1"))
     port: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_PORT", "server.port", 8787))
+    cors_allow_origins: list[str] = field(default_factory=lambda: _cfg_list("server.cors_allow_origins", []))
+    cors_allow_origin_regex: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_CORS_ALLOW_ORIGIN_REGEX", "server.cors_allow_origin_regex", r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"))
     mode: Mode = field(default_factory=lambda: _env_str("LOCAL_PROXY_MODE", "mode", "exploit").strip().lower())  # type: ignore[assignment]
     upstream_base_url: str = field(default_factory=lambda: _env_str("PACKY_BASE_URL", "upstream.base_url", "https://packyapi.com").rstrip("/"))
     upstream_api_key_env: str = field(default_factory=lambda: _env_str("PACKY_API_KEY_ENV", "upstream.api_key_env", "PACKY_API_KEY"))
@@ -102,9 +113,7 @@ class Settings:
     max_answer_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_ANSWER_CHARS", "bill015.max_answer_chars", 16384))
     max_request_bytes: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_REQUEST_BYTES", "limits.max_request_bytes", 1048576))
     max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 2))
-    # 0 means disabled/infinite. The proxy now passes timeout=None to httpx
-    # for upstream calls, so these fields are only kept for config
-    # compatibility and diagnostics.
+    # 0 means disabled/infinite. Positive values are enforced by upstream.py.
     upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 0.0))
     args_done_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_ARGS_DONE_TIMEOUT_MS", "limits.args_done_timeout_ms", 0))
     upstream_idle_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_IDLE_TIMEOUT_MS", "limits.upstream_idle_timeout_ms", 0))

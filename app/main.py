@@ -4,32 +4,19 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, Awaitable
+from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from .audit import audit_logger, redact
+from .audit import audit_logger
 from .config import settings
-from .proxy import (
-    Bill015Result,
-    NormalizedRequest,
-    audit_from_result,
-    chat_json,
-    chat_sse_generator,
-    dry_run_response,
-    execute_bill015,
-    local_response_id,
-    normal_forward_json,
-    normal_forward_stream,
-    normalize_chat_request,
-    normalize_responses_request,
-    request_needs_passthrough,
-    response_json,
-    responses_sse_generator,
-)
+from .models import Bill015Result, NormalizedRequest, local_response_id
+from .normalization import normalize_chat_request, normalize_responses_request, request_needs_passthrough
+from .response_events import chat_json, chat_sse_generator, response_json, responses_sse_generator
 from .state import runtime_state
+from .upstream import audit_from_result, dry_run_response, execute_bill015, normal_forward_json, normal_forward_stream
 
 
 def project_version() -> str:
@@ -44,7 +31,8 @@ PROJECT_VERSION = project_version()
 app = FastAPI(title="BILL-015 Local Codex Proxy", version=PROJECT_VERSION)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_allow_origins,
+    allow_origin_regex=settings.cors_allow_origin_regex or None,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,7 +57,7 @@ async def read_json_body(request: Request) -> dict[str, Any]:
     try:
         obj = json.loads(body)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"invalid JSON: {e}")
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {e}") from e
     if not isinstance(obj, dict):
         raise HTTPException(status_code=400, detail="JSON body must be an object")
     return obj
@@ -115,7 +103,7 @@ async def run_and_record(n: NormalizedRequest, mode: str, local_request_id: str 
                 "error": f"{type(e).__name__}: {e}",
                 "prompt_chars": len(n.user_input),
             })
-            raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}")
+            raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}") from e
 
 
 async def synthetic_result(answer: str, n: NormalizedRequest) -> Bill015Result:

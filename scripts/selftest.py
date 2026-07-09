@@ -15,9 +15,19 @@ os.environ["LOCAL_PROXY_LOG_DIR"] = str(ROOT / "proxy_evidence" / "selftest")
 
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from app.main import app  # noqa: E402
-from app.proxy import Bill015Result, BridgeToolCall, build_bill015_payload, build_client_tool_catalog, collect_bill015_result_from_events, normalize_responses_request, parse_function_arguments, responses_sse_generator  # noqa: E402
+
 from app.config import settings  # noqa: E402
+from app.main import app  # noqa: E402
+from app.proxy import (  # noqa: E402
+    Bill015Result,
+    BridgeToolCall,
+    build_bill015_payload,
+    build_client_tool_catalog,
+    collect_bill015_result_from_events,
+    normalize_responses_request,
+    parse_function_arguments,
+    responses_sse_generator,
+)
 from app.sse import parse_sse_lines  # noqa: E402
 
 

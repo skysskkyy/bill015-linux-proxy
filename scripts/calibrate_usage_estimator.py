@@ -3,10 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
-import re
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -88,7 +88,7 @@ def main() -> None:
     errors: list[float] = []
 
     print(f"[calibrate] requests={len(reqs)} native_completed_usages={len(native_by_id)}")
-    for idx, path in enumerate(reqs):
+    for path in reqs:
         try:
             body = read_json(path)
             if isinstance(body, dict) and isinstance(body.get("request"), dict):

@@ -106,11 +106,13 @@ def make_message_part(part: MessagePart | dict[str, Any] | str) -> dict[str, Any
     if isinstance(part, dict):
         if part.get("type") == "refusal":
             return {"type": "refusal", "refusal": str(part.get("refusal") or part.get("text") or "")}
-        return {
+        out = {
             "type": str(part.get("type") or "output_text"),
             "text": str(part.get("text") or ""),
-            "annotations": part.get("annotations") if isinstance(part.get("annotations"), list) else [],
         }
+        if "annotations" in part:
+            out["annotations"] = part.get("annotations") if isinstance(part.get("annotations"), list) else []
+        return out
     if part.type == "refusal":
         return {"type": "refusal", "refusal": part.refusal or part.text}
     return {"type": part.type, "text": part.text, "annotations": part.annotations}

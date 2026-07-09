@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any, AsyncIterator
 
@@ -9,7 +10,6 @@ from fastapi import HTTPException
 from .config import settings
 from .event_models import (
     EventContext,
-    MessagePart,
     make_message_item,
     make_response_object,
     make_tool_call_item,
@@ -21,7 +21,6 @@ from .event_models import (
 from .models import Bill015Result, BridgeToolCall, NormalizedRequest, local_response_id
 from .sse import encode_sse, split_text
 from .usage_estimator import build_chat_usage
-
 
 TRUNCATION_MARKERS = (
     "[local proxy truncated answer at max_answer_chars]",
@@ -48,7 +47,7 @@ def response_object(
     output: list[dict[str, Any]] = []
     if answer or status in {"completed", "incomplete"}:
         item_id = message_item_id(rid, 0)
-        output = [make_message_item(item_id, "completed" if status in {"completed", "incomplete"} else "in_progress", [MessagePart(text=answer)])]
+        output = [make_message_item(item_id, "completed" if status in {"completed", "incomplete"} else "in_progress", [_message_part(answer)])]
     return make_response_object(
         rid,
         n,
@@ -79,6 +78,13 @@ def response_object_with_tool_calls(
     return make_response_object(rid, n, status, output=output, calls=calls)
 
 
+def _message_part(answer: str) -> dict[str, Any]:
+    part: dict[str, Any] = {"type": "output_text", "text": answer}
+    if settings.responses_emit_annotations:
+        part["annotations"] = []
+    return part
+
+
 class ResponsesEventStream:
     def __init__(self, rid: str, n: NormalizedRequest) -> None:
         self.rid = rid
@@ -101,11 +107,14 @@ class ResponsesEventStream:
 
     def message_events(self, answer: str, *, output_index: int = 0) -> list[bytes]:
         item_id = message_item_id(self.rid, output_index)
-        annotations: list[dict[str, Any]] = [] if settings.responses_emit_annotations else []
-        final_part = {"type": "output_text", "text": answer, "annotations": annotations}
+        final_part = {"type": "output_text", "text": answer}
+        initial_part = {"type": "output_text", "text": ""}
+        if settings.responses_emit_annotations:
+            final_part["annotations"] = []
+            initial_part["annotations"] = []
         events = [
             self.event("response.output_item.added", output_index=output_index, item=make_message_item(item_id, "in_progress", [])),
-            self.event("response.content_part.added", item_id=item_id, output_index=output_index, content_index=0, part={"type": "output_text", "text": "", "annotations": annotations}),
+            self.event("response.content_part.added", item_id=item_id, output_index=output_index, content_index=0, part=initial_part),
         ]
         for chunk in split_text(answer, settings.responses_chunk_size):
             events.append(self.event("response.output_text.delta", item_id=item_id, output_index=output_index, content_index=0, delta=chunk, logprobs=[]))
@@ -250,9 +259,13 @@ async def chat_sse_generator(result_coro, n: NormalizedRequest) -> AsyncIterator
     try:
         result: Bill015Result = await result_coro
         finish_reason = "tool_calls" if result.bridge_mode == "tool_call" and result.tool_calls else "stop"
-        yield encode_sse({"id": result.local_request_id, "object": "chat.completion.chunk", "model": n.model, "choices": [{"index": 0, "delta": {"role": "assistant"}}]})
-        for chunk in split_text(result.answer, 512):
-            yield encode_sse({"id": result.local_request_id, "object": "chat.completion.chunk", "model": n.model, "choices": [{"index": 0, "delta": {"content": chunk}}]})
+        initial_delta: dict[str, Any] = {"role": "assistant"}
+        if finish_reason == "tool_calls":
+            initial_delta["tool_calls"] = [_chat_tool_call_delta(call, index) for index, call in enumerate(result.tool_calls)]
+        yield encode_sse({"id": result.local_request_id, "object": "chat.completion.chunk", "model": n.model, "choices": [{"index": 0, "delta": initial_delta}]})
+        if finish_reason != "tool_calls":
+            for chunk in split_text(result.answer, 512):
+                yield encode_sse({"id": result.local_request_id, "object": "chat.completion.chunk", "model": n.model, "choices": [{"index": 0, "delta": {"content": chunk}}]})
         yield encode_sse({"id": result.local_request_id, "object": "chat.completion.chunk", "model": n.model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}], "usage": build_chat_usage(n, answer=result.answer)})
         yield b"data: [DONE]\n\n"
     except HTTPException as e:
@@ -265,14 +278,57 @@ async def chat_sse_generator(result_coro, n: NormalizedRequest) -> AsyncIterator
 
 def chat_json(result: Bill015Result, n: NormalizedRequest) -> dict[str, Any]:
     finish_reason = "tool_calls" if result.bridge_mode == "tool_call" and result.tool_calls else "stop"
+    message: dict[str, Any] = {"role": "assistant", "content": result.answer}
+    if finish_reason == "tool_calls":
+        message["content"] = None
+        message["tool_calls"] = [_chat_tool_call(call, index) for index, call in enumerate(result.tool_calls)]
     return {
         "id": "chatcmpl-local-" + result.local_request_id.removeprefix("resp_local_"),
         "object": "chat.completion",
         "created": int(time.time()),
         "model": n.model,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": result.answer}, "finish_reason": finish_reason}],
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "usage": build_chat_usage(n, answer=result.answer),
     }
+
+
+def _chat_tool_call(call: BridgeToolCall, index: int) -> dict[str, Any]:
+    # Chat Completions only has the function tool-call shape. Preserve custom
+    # and namespace metadata inside arguments so downstream clients can still
+    # route the native Codex call.
+    arguments = call.arguments
+    name = call.name
+    if call.call_type != "function" or call.namespace:
+        arguments = _chat_tool_call_arguments(call)
+        name = call.name
+    return {
+        "id": call.id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        },
+    }
+
+
+def _chat_tool_call_delta(call: BridgeToolCall, index: int) -> dict[str, Any]:
+    item = _chat_tool_call(call, index)
+    return {"index": index, **item}
+
+
+def _chat_tool_call_arguments(call: BridgeToolCall) -> str:
+    return json.dumps(
+        {
+            "type": call.call_type,
+            "namespace": call.namespace or "",
+            "name": call.name,
+            "arguments": call.arguments,
+            "input": call.arguments if call.call_type == "custom" else "",
+            "requested_name": call.requested_name or call.name,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _status_for_answer(answer: str) -> tuple[str, dict[str, Any] | None]:

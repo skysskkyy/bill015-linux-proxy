@@ -6,7 +6,7 @@ import re
 import time
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from .config import settings
 

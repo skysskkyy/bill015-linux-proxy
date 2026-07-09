@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-
 CALL_TYPES = {
     "function_call",
     "custom_tool_call",

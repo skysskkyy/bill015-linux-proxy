@@ -6,9 +6,7 @@ from .models import BridgeToolCall, NormalizedRequest
 from .usage_estimator import (
     build_chat_usage,
     build_response_usage,
-    estimate_request_input_tokens,
     estimate_response_output_tokens,
-    estimate_text_tokens,
 )
 
 
