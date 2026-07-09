@@ -20,7 +20,7 @@ def test_repaired_function_arguments_are_marked_malformed():
 
 
 def test_normal_forward_json_preserves_upstream_error_status(monkeypatch):
-    from app import upstream
+    from app import upstream_client
     from app.config import settings
 
     class DummyResponse:
@@ -45,11 +45,11 @@ def test_normal_forward_json_preserves_upstream_error_status(monkeypatch):
 
     monkeypatch.setattr(settings, "upstream_api_key_file_value", "sk-test")
     monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
-    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(upstream_client.httpx, "AsyncClient", DummyClient)
 
     async def run():
         try:
-            await upstream.normal_forward_json({"model": "gpt-test", "input": "hello"})
+            await upstream_client.normal_forward_json({"model": "gpt-test", "input": "hello"})
         except HTTPException as exc:
             return exc
         raise AssertionError("normal_forward_json did not raise for upstream 429")
@@ -96,3 +96,12 @@ def test_tool_bridge_strict_mode_drops_unregistered_tools(monkeypatch):
     )
     assert registered is not None
     assert registered.name == "shell_command"
+
+
+def test_config_schema_reports_unknown_fields():
+    from app.config_schema import validate_local_config
+
+    warnings = validate_local_config({"limits": {"max_concurrency": 2, "old_unused_limit": 1}})
+
+    assert warnings
+    assert "limits.old_unused_limit" in warnings[0]

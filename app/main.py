@@ -11,12 +11,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .audit import audit_logger
+from .chat_events import chat_json, chat_sse_generator
 from .config import settings
 from .models import Bill015Result, NormalizedRequest, local_response_id
 from .normalization import normalize_chat_request, normalize_responses_request, request_needs_passthrough
-from .response_events import chat_json, chat_sse_generator, response_json, responses_sse_generator
+from .response_events import response_json, responses_sse_generator
 from .state import runtime_state
-from .upstream import audit_from_result, dry_run_response, execute_bill015, normal_forward_json, normal_forward_stream
+from .upstream import audit_from_result, dry_run_response, execute_bill015
+from .upstream_client import normal_forward_json, normal_forward_stream
 
 
 def project_version() -> str:
@@ -131,6 +133,7 @@ async def healthz() -> dict[str, Any]:
         "host": settings.host,
         "port": settings.port,
         "max_concurrency": settings.max_concurrency,
+        "config_warnings": getattr(settings, "config_warnings", []),
         "metrics": runtime_state.snapshot(),
     }
 

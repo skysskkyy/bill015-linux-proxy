@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .chat_events import chat_json, chat_sse_generator
+
 # Compatibility facade: keep existing imports stable while implementation lives
 # in smaller modules with clearer responsibilities.
 from .models import Bill015Result, BridgeToolCall, NormalizedRequest, local_response_id
@@ -24,7 +26,7 @@ from .payloads import (
     build_compaction_bill015_payload,
     build_emit_value_schema,
 )
-from .response_events import chat_json, chat_sse_generator, response_json, responses_sse_generator
+from .response_events import response_json, responses_sse_generator
 from .tool_bridge import build_client_tool_catalog, parse_function_arguments
 from .upstream import (
     audit_from_result,
@@ -33,10 +35,8 @@ from .upstream import (
     dry_run_response,
     execute_bill015,
     fetch_user_self,
-    normal_forward_json,
-    normal_forward_stream,
-    prepare_passthrough_payload,
 )
+from .upstream_client import normal_forward_json, normal_forward_stream, prepare_passthrough_payload
 
 __all__ = [
     'Bill015Result',

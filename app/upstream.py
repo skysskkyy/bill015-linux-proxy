@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import time
-from typing import Any, AsyncIterator, Iterable
+from typing import Any, Iterable
 
 import httpx
 from fastapi import HTTPException
@@ -13,26 +12,11 @@ from .audit import redact
 from .config import Settings, settings
 from .models import Bill015Result, NormalizedRequest, local_response_id
 from .payloads import build_bill015_payload
-from .sse import SSEEvent, encode_sse, parse_async_sse_lines
+from .sse import SSEEvent, parse_async_sse_lines
 from .tool_bridge import parse_function_arguments
 from .tool_history import is_repeated_successful_call
+from .upstream_client import http_timeout, upstream_auth_headers
 from .usage_estimator import usage_estimate_dict
-
-
-def _http_timeout(cfg: Settings = settings) -> httpx.Timeout | None:
-    """Build the effective upstream timeout from config.
-
-    A value <= 0 keeps the previous "no overall timeout" behavior. If only an
-    idle/read timeout is configured, keep connect bounded so dead TCP handshakes
-    do not hang forever.
-    """
-    total = cfg.upstream_timeout_seconds if cfg.upstream_timeout_seconds > 0 else None
-    args_done = cfg.args_done_timeout_ms / 1000 if cfg.args_done_timeout_ms > 0 else None
-    read = cfg.upstream_idle_timeout_ms / 1000 if cfg.upstream_idle_timeout_ms > 0 else (total or args_done)
-    connect = total if total is not None else 10.0
-    if total is None and read is None:
-        return None
-    return httpx.Timeout(timeout=total, connect=connect, read=read, write=total, pool=total)
 
 
 def _args_done_deadline(cfg: Settings = settings) -> float | None:
@@ -150,7 +134,7 @@ async def fetch_user_self(cfg: Settings = settings) -> dict[str, Any] | None:
     if not cfg.packy_cookie:
         return None
     try:
-        async with httpx.AsyncClient(timeout=_http_timeout(cfg)) as client:
+        async with httpx.AsyncClient(timeout=http_timeout(cfg)) as client:
             r = await client.get(
                 cfg.upstream_base_url + "/api/user/self",
                 headers={"Cookie": cfg.packy_cookie, "new-api-user": cfg.packy_user_id, "User-Agent": "bill015-local-proxy/1.0"},
@@ -185,14 +169,9 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
     args_buffer: list[str] = []
     answer_buffer: list[str] = []
     args_done_deadline = _args_done_deadline(cfg)
-    headers = {
-        "Authorization": "Bearer " + cfg.upstream_api_key,
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream",
-        "User-Agent": "bill015-local-proxy/1.0",
-    }
+    headers = upstream_auth_headers(stream=True, cfg=cfg)
     try:
-        async with httpx.AsyncClient(timeout=_http_timeout(cfg)) as client:
+        async with httpx.AsyncClient(timeout=http_timeout(cfg)) as client:
             async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=payload) as resp:
                 if resp.status_code != 200:
                     body = await resp.aread()
@@ -283,49 +262,3 @@ def dry_run_response(n: NormalizedRequest, mode: str = "dry-run") -> dict[str, A
         "usage_estimate": usage_estimate_dict(n),
         "payload": safe_payload,
     }
-
-def prepare_passthrough_payload(body: dict[str, Any], cfg: Settings = settings) -> dict[str, Any]:
-    """Native Codex Responses passthrough.
-
-    In normal mode the proxy should behave like a thin translator, not like an
-    agent protocol adapter. Preserve Codex's original Responses request shape
-    exactly and only map the model name so CC Switch/Codex can select gpt-5.4
-    or gpt-5.5 through this local provider.
-    """
-    payload = copy.deepcopy(body)
-    payload["model"] = cfg.map_model(payload.get("model"))
-    return payload
-
-async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) -> AsyncIterator[bytes]:
-    if not cfg.upstream_api_key:
-        yield encode_sse({"type": "error", "error": {"message": f"Missing upstream API key env {cfg.upstream_api_key_env}"}}, "error")
-        yield b"data: [DONE]\n\n"
-        return
-    headers = {"Authorization": "Bearer " + cfg.upstream_api_key, "Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": "bill015-local-proxy/1.0"}
-    try:
-        async with httpx.AsyncClient(timeout=_http_timeout(cfg)) as client:
-            async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=prepare_passthrough_payload(body, cfg)) as resp:
-                if resp.status_code != 200:
-                    body_bytes = await resp.aread()
-                    yield encode_sse({"type": "error", "error": {"message": body_bytes[:2000].decode("utf-8", errors="replace"), "upstream_status": resp.status_code, "type": "upstream_error"}}, "error")
-                    yield b"data: [DONE]\n\n"
-                    return
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
-    except Exception as e:
-        yield encode_sse({"type": "error", "error": {"message": f"{type(e).__name__}: {e}", "type": "local_proxy_error"}}, "error")
-        yield b"data: [DONE]\n\n"
-
-async def normal_forward_json(body: dict[str, Any], cfg: Settings = settings) -> dict[str, Any]:
-    if not cfg.upstream_api_key:
-        raise HTTPException(status_code=500, detail=f"Missing upstream API key env {cfg.upstream_api_key_env}")
-    headers = {"Authorization": "Bearer " + cfg.upstream_api_key, "Content-Type": "application/json", "User-Agent": "bill015-local-proxy/1.0"}
-    async with httpx.AsyncClient(timeout=_http_timeout(cfg)) as client:
-        r = await client.post(cfg.upstream_base_url + "/v1/responses", headers=headers, json=prepare_passthrough_payload(body, cfg))
-    try:
-        obj = r.json()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail={"upstream_status": r.status_code, "body": r.text[:2000]}) from e
-    if r.status_code < 200 or r.status_code >= 300:
-        raise HTTPException(status_code=r.status_code, detail={"upstream_status": r.status_code, "body": obj})
-    return obj

@@ -6,12 +6,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Literal
 
+from .config_schema import validate_local_config
+
 Mode = Literal["exploit", "verify", "normal", "dry-run"]
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.local.json"
+CONFIG_WARNINGS: list[str] = []
 
 
 def _load_local_config() -> dict[str, Any]:
+    global CONFIG_WARNINGS
+    CONFIG_WARNINGS = []
     # Default behavior: read local project config. An env override is kept only for tests/advanced use.
     raw_path = os.getenv("BILL015_CONFIG_PATH", "")
     path = Path(raw_path) if raw_path else DEFAULT_CONFIG_PATH
@@ -19,8 +24,13 @@ def _load_local_config() -> dict[str, Any]:
         return {}
     try:
         obj = json.loads(path.read_text(encoding="utf-8"))
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
+        if not isinstance(obj, dict):
+            CONFIG_WARNINGS = ["<root>: config JSON must be an object"]
+            return {}
+        CONFIG_WARNINGS = validate_local_config(obj)
+        return obj
+    except Exception as e:
+        CONFIG_WARNINGS = [f"<root>: failed to read config: {type(e).__name__}: {e}"]
         return {}
 
 
@@ -179,3 +189,4 @@ class Settings:
 
 settings = Settings()
 settings.validate_mode()
+settings.config_warnings = CONFIG_WARNINGS

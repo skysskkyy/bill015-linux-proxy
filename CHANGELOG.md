@@ -2,6 +2,18 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.3.0] - 2026-07-10
+
+### Changed
+- Split Chat Completions compatibility into `app/chat_events.py` so `app/response_events.py` focuses on Responses event synthesis.
+- Split upstream timeout, auth headers, passthrough payload preparation, and normal forwarding into `app/upstream_client.py`.
+- Added `app/config_schema.py` to validate local config shape and expose non-fatal config warnings through `/healthz`.
+- Preserved compatibility facade exports for older imports while moving implementation into focused modules.
+
+### Tests
+- Added config schema regression coverage for unknown-field warnings.
+- Verified Codex CLI can use this local proxy as its Responses provider at `http://127.0.0.1:8787/v1` and successfully run local-tool tasks through it.
+
 ## [0.2.2] - 2026-07-10
 
 ### Fixed

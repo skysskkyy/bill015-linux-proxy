@@ -12,7 +12,7 @@ This project uses local Git version control.
 Current version:
 
 ```text
-0.2.2
+0.3.0
 ```
 
 ## Required workflow for every modification
@@ -54,7 +54,7 @@ The following are intentionally ignored:
 git status
 git add <files>
 git commit -m "message"
-git tag v0.2.2
+git tag v0.3.0
 ```
 
 Before committing, verify no secrets are staged:
