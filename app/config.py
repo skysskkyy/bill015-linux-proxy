@@ -154,7 +154,7 @@ class Settings:
     responses_strict_sequence_numbers: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_STRICT_SEQUENCE_NUMBERS", "responses_events.strict_sequence_numbers", True))
     responses_typed_keepalive: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_TYPED_KEEPALIVE", "responses_events.typed_keepalive", False))
     responses_chunk_size: int = field(default_factory=lambda: _env_int("BILL015_RESPONSES_CHUNK_SIZE", "responses_events.chunk_size", 256))
-    tool_bridge_allow_unknown_tools: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_ALLOW_UNKNOWN_TOOLS", "tool_bridge.allow_unknown_tools", True))
+    tool_bridge_allow_unknown_tools: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_ALLOW_UNKNOWN_TOOLS", "tool_bridge.allow_unknown_tools", False))
 
     @property
     def upstream_api_key(self) -> str:

@@ -2,6 +2,16 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.3.4] - 2026-07-12
+
+### Changed
+- Default `tool_bridge.allow_unknown_tools` is now `false`, so model-requested tools not present in the current Codex tool registry are dropped fail-closed.
+- When no local tools are registered and unknown tools are disabled, the upstream `emit_value` schema now restricts `mode` to `answer` and `tool_calls` to an empty array instead of exposing a generic fallback tool shape.
+- Updated local/example configs to prefer `tool_search` discovery over hallucinated direct tool calls.
+
+### Tests
+- Added regressions for no-config default behavior and no-registry strict schema generation.
+
 ## [0.3.3] - 2026-07-12
 
 ### Fixed

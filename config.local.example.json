@@ -69,6 +69,6 @@
     "token": "change-me-local-admin"
   },
   "tool_bridge": {
-    "allow_unknown_tools": true
+    "allow_unknown_tools": false
   }
 }

@@ -32,10 +32,23 @@ def build_emit_value_schema(
     cfg: Settings = settings,
     tool_registry: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    can_call_tools = bool(tool_registry) or cfg.tool_bridge_allow_unknown_tools
     tool_call_item_schema = build_typed_tool_call_schema(
         tool_registry,
         allow_generic_fallback=cfg.tool_bridge_allow_unknown_tools and not tool_registry,
     )
+    tool_calls_schema: dict[str, Any] = {
+        "type": "array",
+        "description": "One or more Codex local tool calls requested when mode=tool_call. Items are generated from the native Codex tool registry for this turn; multiple independent calls may be emitted in parallel.",
+        "items": tool_call_item_schema,
+    }
+    if not can_call_tools:
+        tool_calls_schema = {
+            "type": "array",
+            "maxItems": 0,
+            "description": "No local tools are registered for this turn; return mode=answer and tool_calls=[].",
+            "items": tool_call_item_schema,
+        }
     return {
         "type": "function",
         "name": cfg.function_name,
@@ -45,18 +58,14 @@ def build_emit_value_schema(
             "properties": {
                 "mode": {
                     "type": "string",
-                    "enum": ["answer", "tool_call"],
+                    "enum": ["answer", "tool_call"] if can_call_tools else ["answer"],
                     "description": "Use answer for final text. Use tool_call when a local Codex tool must be invoked."
                 },
                 cfg.answer_field: {
                     "type": "string",
                     "description": "Final assistant answer when mode=answer."
                 },
-                "tool_calls": {
-                    "type": "array",
-                    "description": "One or more Codex local tool calls requested when mode=tool_call. Items are generated from the native Codex tool registry for this turn; multiple independent calls may be emitted in parallel.",
-                    "items": tool_call_item_schema,
-                }
+                "tool_calls": tool_calls_schema,
             },
             "required": ["mode", cfg.answer_field, "tool_calls"],
             "additionalProperties": False,

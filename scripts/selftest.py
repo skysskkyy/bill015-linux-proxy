@@ -176,7 +176,10 @@ def main() -> None:
 
     answer, malformed, repaired, mode, calls = parse_function_arguments('{"mode":"answer","answer":"OK","tool_calls":[]}')
     assert_true(answer == "OK" and mode == "answer" and not calls and not malformed and not repaired, "argument parser failed")
-    t_answer, _, _, t_mode, t_calls = parse_function_arguments('{"mode":"tool_call","answer":"","tool_calls":[{"name":"shell_command","arguments":"{\\\"command\\\":\\\"pwd\\\"}"}]}')
+    t_answer, _, _, t_mode, t_calls = parse_function_arguments(
+        '{"mode":"tool_call","answer":"","tool_calls":[{"name":"shell_command","arguments":"{\\\"command\\\":\\\"pwd\\\"}"}]}',
+        tool_registry={"shell_command": {"call_type": "function", "output_name": "shell_command", "raw_type": "function"}},
+    )
     assert_true(t_mode == "tool_call" and len(t_calls) == 1 and t_calls[0].name == "shell_command", "tool_call parser failed")
     print("[ok] function argument parser")
 
@@ -386,4 +389,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

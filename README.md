@@ -12,6 +12,7 @@
 - `0.3.1` 起：exploit/verify 模式对上游预流式 `HTTP 5xx` / `do_request_failed` / 网络抖动做安全重试；一旦已收到上游 SSE 事件则不重试，避免重复执行或影响 abort 语义。
 - `0.3.2` 起：上游 `emit_value` 的 `tool_calls` 不再只靠文本工具目录，而是按本轮 Codex 工具动态生成强类型 `oneOf` schema，约束工具名、namespace 和参数结构。
 - `0.3.3` 起：默认启用 `bill015.strict_zero=true`，直接阻断 `auto-passthrough` / `normal` 这类可能产生真实扣费的路径；同时修复带工具结果的后续提问里“第二句话被旧问题盖住”的排序问题。
+- `0.3.4` 起：默认关闭未知工具 `tool_bridge.allow_unknown_tools=false`；未出现在当前 Codex 工具 registry 的工具会被丢弃，缺工具时先走 `tool_search` 暴露工具。
 - 本阶段不做 Codex 配置接入
 
 ## 本地配置
@@ -58,6 +59,9 @@ S:\hack\packyapi.com\bill015_local_proxy\config.local.example.json
   "mode": "exploit",
   "bill015": {
     "strict_zero": true
+  },
+  "tool_bridge": {
+    "allow_unknown_tools": false
   }
 }
 ```
@@ -153,6 +157,22 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 - 禁用上游重试：避免一次用户请求产生第二次真实上游生成尝试。
 
 如果你明确要牺牲“不扣量”来换原生多媒体/文件能力，再手动改成 `false`。
+
+## 工具桥严格模式
+
+默认配置：
+
+```json
+"tool_bridge": {
+  "allow_unknown_tools": false
+}
+```
+
+效果：
+
+- 上游模型只能请求当前 Codex 请求里显式提供的工具，或 `tool_search` 暴露后的 deferred 工具。
+- 未注册工具不会被下发给本地 Codex，避免模型幻觉工具名造成乱调用。
+- 如果本轮没有任何工具 registry，`emit_value` schema 会限制为 `mode="answer"` 和 `tool_calls=[]`。
 
 ## 502 / 上游 500 稳定性
 

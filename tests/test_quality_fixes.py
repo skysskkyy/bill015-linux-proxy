@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 
 from fastapi import HTTPException
 
@@ -96,6 +99,45 @@ def test_tool_bridge_strict_mode_drops_unregistered_tools(monkeypatch):
     )
     assert registered is not None
     assert registered.name == "shell_command"
+
+
+def test_unknown_tools_disabled_by_default_without_local_config(tmp_path):
+    env = os.environ.copy()
+    env["BILL015_CONFIG_PATH"] = str(tmp_path / "missing-config.json")
+    env.pop("BILL015_TOOL_BRIDGE_ALLOW_UNKNOWN_TOOLS", None)
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "from app.config import settings; print(settings.tool_bridge_allow_unknown_tools)"],
+        cwd=os.getcwd(),
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.strip() == "False"
+
+
+def test_strict_unknown_tool_schema_disables_tool_calls_without_registry(monkeypatch):
+    from app.config import settings
+    from app.payloads import build_emit_value_schema
+    from app.tool_bridge import parse_function_arguments
+
+    monkeypatch.setattr(settings, "tool_bridge_allow_unknown_tools", False)
+    schema = build_emit_value_schema(settings, {})
+    params = schema["parameters"]["properties"]
+
+    assert params["mode"]["enum"] == ["answer"]
+    assert params["tool_calls"]["maxItems"] == 0
+
+    answer, _, _, mode, calls = parse_function_arguments(
+        '{"mode":"tool_call","answer":"","tool_calls":[{"type":"function","namespace":"","name":"not_registered","arguments":{},"input":""}]}',
+        tool_registry={},
+    )
+    assert mode == "answer"
+    assert calls == []
+    assert "no valid tool_calls" in answer
 
 
 def test_emit_value_schema_embeds_typed_tool_oneof():
