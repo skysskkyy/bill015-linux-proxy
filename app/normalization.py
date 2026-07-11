@@ -7,7 +7,7 @@ from .config import Settings, settings
 from .models import NormalizedRequest
 from .tool_bridge import build_client_tool_catalog
 from .tool_history import parse_tool_history, render_tool_feedback_for_model
-from .usage_estimator import estimate_chat_usage_from_body, estimate_responses_usage_from_body
+from .usage_estimator import estimate_chat_usage_from_body, estimate_responses_usage_from_body, estimate_text_tokens
 
 
 def model_identity_instruction(model: str) -> str:
@@ -104,7 +104,76 @@ def detect_request_kind(body: dict[str, Any]) -> tuple[str, bool]:
     is_compaction = request_kind == "compaction" or isinstance(turn_md.get("compaction"), dict)
     return request_kind, is_compaction
 
-def extract_context_messages(value: Any, *, max_chars: int = 90000) -> str:
+def _clip_text_to_token_budget(text: str, max_tokens: int, *, keep: str = "head_tail") -> str:
+    text = str(text or "")
+    if max_tokens <= 0:
+        return ""
+    if estimate_text_tokens(text) <= max_tokens:
+        return text
+    # Binary search by character count, but the stopping criterion is token
+    # budget, not a hard character ceiling.
+    lo, hi = 0, len(text)
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if keep == "tail":
+            candidate = text[-mid:] if mid else ""
+        elif keep == "head":
+            candidate = text[:mid]
+        else:
+            head = mid // 3
+            tail = mid - head
+            candidate = text[:head] + f"\n...[token-budget omitted middle content; original_tokens~{estimate_text_tokens(text)} budget={max_tokens}]...\n" + text[-tail:]
+        if estimate_text_tokens(candidate) <= max_tokens:
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best or text[: max(200, max_tokens * 2)]
+
+
+def _join_sections_by_token_budget(sections: list[tuple[str, str, str]], max_tokens: int) -> str:
+    """Join priority-ordered context sections under an estimated token budget.
+
+    Sections are `(label, text, keep)` where keep controls clipping strategy.
+    The caller already orders sections from most to least important.
+    """
+    out: list[str] = []
+    remaining = max_tokens
+    for label, text, keep in sections:
+        text = str(text or "").strip()
+        if not text or remaining <= 0:
+            continue
+        header = f"--- {label} ---\n"
+        header_tokens = estimate_text_tokens(header)
+        if header_tokens >= remaining:
+            break
+        body_budget = remaining - header_tokens
+        if keep == "tail":
+            body_budget = min(body_budget, max(2_000, max_tokens // 3))
+        body = _clip_text_to_token_budget(text, body_budget, keep=keep)
+        if not body:
+            continue
+        out.append(header + body)
+        remaining = max_tokens - estimate_text_tokens("\n\n".join(out))
+    return "\n\n".join(out)
+
+
+def _context_token_budget(body: dict[str, Any], usage_input_tokens: int, cfg: Settings = settings) -> int:
+    requested_output = body.get("max_output_tokens") or body.get("max_tokens") or cfg.max_output_tokens
+    try:
+        output_reserve = max(1024, int(requested_output))
+    except Exception:
+        output_reserve = max(1024, cfg.max_output_tokens)
+    # Keep a generous but bounded upstream context budget. The native Codex
+    # request can be huge; older material should be represented by compaction
+    # summaries rather than raw replay.
+    total_budget = 120_000
+    overhead_reserve = 8_000
+    return max(8_000, min(80_000, total_budget - output_reserve - overhead_reserve, usage_input_tokens + 12_000))
+
+
+def extract_context_messages(value: Any, *, max_tokens: int = 16_000) -> str:
     if not isinstance(value, list):
         return ""
     parts: list[str] = []
@@ -118,29 +187,43 @@ def extract_context_messages(value: Any, *, max_chars: int = 90000) -> str:
         if text:
             parts.append(f"[{role}]\n{text}")
     out = "\n\n".join(parts)
-    if len(out) > max_chars:
-        out = out[:max_chars] + "\n[local proxy truncated developer/system context]"
-    return out
+    clipped = _clip_text_to_token_budget(out, max_tokens, keep="head_tail")
+    if clipped != out:
+        clipped += "\n[local proxy token-budget clipped developer/system context]"
+    return clipped
 
-def _short_json(value: Any, max_chars: int = 18000) -> str:
+def _short_json(value: Any, max_tokens: int = 4_000) -> str:
     try:
         text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     except Exception:
         text = str(value)
-    if len(text) > max_chars:
-        return text[: max_chars // 2] + f"\n...[truncated {len(text) - max_chars} chars]...\n" + text[-max_chars // 2 :]
-    return text
+    return _clip_text_to_token_budget(text, max_tokens, keep="head_tail")
 
-def native_input_transcript(value: Any, *, max_chars: int = 180000, include_context_roles: bool = False) -> str:
+def native_input_transcript(
+    value: Any,
+    *,
+    max_tokens: int = 32_000,
+    include_context_roles: bool = False,
+    omit_latest_user_body: bool = False,
+    omit_latest_tool_batch: bool = False,
+) -> str:
     if isinstance(value, str):
-        return value[:max_chars]
+        return _clip_text_to_token_budget(value, max_tokens, keep="tail")
     if not isinstance(value, list):
-        return flatten_content(value)[:max_chars]
-    lines: list[str] = []
+        return _clip_text_to_token_budget(flatten_content(value), max_tokens, keep="tail")
+    history = parse_tool_history(value)
+    latest_batch_ids = {out.call_id for out in history.latest_outputs if out.call_id} if omit_latest_tool_batch else set()
+    latest_user_index = -1
+    for idx, item in enumerate(value):
+        if isinstance(item, dict) and item.get("role") == "user" and flatten_content(item.get("content", item.get("text", ""))).strip():
+            latest_user_index = idx
+    current_sections: list[str] = []
+    recent_sections: list[str] = []
+    history_sections: list[str] = []
     omitted_context = 0
     for idx, item in enumerate(value):
         if not isinstance(item, dict):
-            lines.append(f"[{idx}] {flatten_content(item)}")
+            history_sections.append(f"[{idx}] {flatten_content(item)}")
             continue
         role = str(item.get("role") or "")
         typ = str(item.get("type") or "message")
@@ -150,31 +233,41 @@ def native_input_transcript(value: Any, *, max_chars: int = 180000, include_cont
         if typ == "message" or role:
             text = flatten_content(item.get("content", item.get("text", "")))
             if text:
-                lines.append(f"[{idx}] {role or 'event'} message:\n{text}")
+                if idx == latest_user_index and omit_latest_user_body:
+                    current_sections.append(f"[{idx}] current user message moved above; body omitted here to avoid duplication.")
+                elif idx == latest_user_index:
+                    current_sections.append(f"[{idx}] {role or 'event'} message:\n{text}")
+                else:
+                    history_sections.append(f"[{idx}] {role or 'event'} message:\n{text}")
                 continue
         if typ in {"function_call", "custom_tool_call", "tool_search_call", "web_search_call", "computer_call"}:
-            lines.append(f"[{idx}] assistant {typ}: " + _short_json(item, 12000))
+            call_id = str(item.get("call_id") or item.get("id") or "")
+            target = recent_sections if call_id in latest_batch_ids else history_sections
+            target.append(f"[{idx}] assistant {typ}: " + _short_json(item, 2_500))
             continue
         if typ in {"function_call_output", "custom_tool_call_output", "tool_result", "tool_search_output", "computer_call_output"}:
-            lines.append(f"[{idx}] tool output: " + _short_json(item, 14000))
+            call_id = str(item.get("call_id") or item.get("id") or "")
+            if call_id in latest_batch_ids:
+                recent_sections.append(f"[{idx}] latest tool batch output moved above; raw body omitted here to avoid duplication.")
+            else:
+                history_sections.append(f"[{idx}] tool output: " + _short_json(item, 2_000))
             continue
         if typ == "reasoning":
             summary = item.get("summary")
             if summary:
-                lines.append(f"[{idx}] reasoning summary: " + _short_json(summary, 4000))
+                recent_sections.append(f"[{idx}] reasoning summary: " + _short_json(summary, 1_200))
             else:
-                lines.append(f"[{idx}] reasoning: <encrypted/omitted>")
+                history_sections.append(f"[{idx}] reasoning: <encrypted/omitted>")
             continue
-        lines.append(f"[{idx}] {typ}: " + _short_json(item, 8000))
+        history_sections.append(f"[{idx}] {typ}: " + _short_json(item, 1_500))
     if omitted_context:
-        lines.insert(0, f"[local proxy] moved {omitted_context} developer/system message(s) into upstream system context.")
-    out = "\n\n".join(lines)
-    if len(out) > max_chars:
-        # Preserve both early setup and latest turn/tool outputs, like a local memento.
-        head = max_chars // 3
-        tail = max_chars - head
-        out = out[:head] + f"\n...[local proxy transcript truncated {len(out) - max_chars} chars; keeping latest context below]...\n" + out[-tail:]
-    return out
+        current_sections.insert(0, f"[local proxy] moved {omitted_context} developer/system message(s) into upstream system context.")
+    sections = [
+        ("Current task state", "\n\n".join(current_sections), "head_tail"),
+        ("Recent non-output events / reasoning", "\n\n".join(recent_sections), "head_tail"),
+        ("Related prior history", "\n\n".join(history_sections), "tail"),
+    ]
+    return _join_sections_by_token_budget(sections, max_tokens)
 
 def last_user_instruction(value: Any) -> str:
     if isinstance(value, str):
@@ -305,11 +398,24 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
     tools_catalog, tool_registry = combine_tool_catalogs(body.get("tools"), raw_input)
     request_kind, is_compaction = detect_request_kind(body)
     base_instructions = flatten_content(body.get("instructions", ""))
-    context_messages = extract_context_messages(raw_input)
+    context_budget = _context_token_budget(body, usage_estimate.input_tokens, cfg)
+    context_messages = extract_context_messages(raw_input, max_tokens=max(4_000, context_budget // 5))
     instructions = base_instructions
     if context_messages:
         instructions = (instructions + "\n\n" if instructions else "") + "Client developer/system messages from native Codex input:\n" + context_messages
-    user_input = native_input_transcript(raw_input, include_context_roles=False) if isinstance(raw_input, list) else flatten_responses_input(raw_input)
+    instruction_tokens = estimate_text_tokens(instructions)
+    transcript_budget = max(6_000, context_budget - instruction_tokens - estimate_text_tokens(latest_tool_summary) - 2_000)
+    user_input = (
+        native_input_transcript(
+            raw_input,
+            max_tokens=transcript_budget,
+            include_context_roles=False,
+            omit_latest_user_body=True,
+            omit_latest_tool_batch=True,
+        )
+        if isinstance(raw_input, list)
+        else _clip_text_to_token_budget(flatten_responses_input(raw_input), transcript_budget, keep="tail")
+    )
     return NormalizedRequest(
         model=model,
         original_model=body.get("model"),

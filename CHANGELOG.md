@@ -2,6 +2,17 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.3.5] - 2026-07-12
+
+### Changed
+- Reworked native context assembly around an estimated token budget instead of fixed character truncation: reserve output room first, then prioritize current request, latest tool batch/state, and tail-prioritized related history.
+- Hoisted the latest user request without duplicating it inside the replay transcript.
+- Preserved the complete latest parallel tool-output batch instead of slicing `latest_outputs` to the last three records.
+- Tool feedback now reports batch/call IDs and head/tail output snippets with exit/error metadata under a token budget.
+
+### Tests
+- Added coverage for latest-user de-duplication, token-budgeted transcript priority, and parallel batches larger than three outputs.
+
 ## [0.3.4] - 2026-07-12
 
 ### Changed

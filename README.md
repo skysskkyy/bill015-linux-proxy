@@ -13,6 +13,7 @@
 - `0.3.2` 起：上游 `emit_value` 的 `tool_calls` 不再只靠文本工具目录，而是按本轮 Codex 工具动态生成强类型 `oneOf` schema，约束工具名、namespace 和参数结构。
 - `0.3.3` 起：默认启用 `bill015.strict_zero=true`，直接阻断 `auto-passthrough` / `normal` 这类可能产生真实扣费的路径；同时修复带工具结果的后续提问里“第二句话被旧问题盖住”的排序问题。
 - `0.3.4` 起：默认关闭未知工具 `tool_bridge.allow_unknown_tools=false`；未出现在当前 Codex 工具 registry 的工具会被丢弃，缺工具时先走 `tool_search` 暴露工具。
+- `0.3.5` 起：上下文按 token 预算和优先级组织，不再按大字符数硬截断；最新用户请求去重置顶，最近并行工具批次完整保留并做 head/tail 摘要。
 - 本阶段不做 Codex 配置接入
 
 ## 本地配置
@@ -173,6 +174,17 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 - 上游模型只能请求当前 Codex 请求里显式提供的工具，或 `tool_search` 暴露后的 deferred 工具。
 - 未注册工具不会被下发给本地 Codex，避免模型幻觉工具名造成乱调用。
 - 如果本轮没有任何工具 registry，`emit_value` schema 会限制为 `mode="answer"` 和 `tool_calls=[]`。
+
+## 上下文预算策略
+
+代理会先按当前请求预留输出预算，再按优先级组织上游输入：
+
+1. 当前用户请求
+2. 最近一批本地工具结果 / 当前任务状态
+3. 相关历史尾部与 compaction 摘要
+4. 工具 schema
+
+旧历史不再按固定字符数从头硬塞；长输出也会保留退出码、错误线和 head/tail 关键内容，避免最近工具批次超过 3 个时丢结果。
 
 ## 502 / 上游 500 稳定性
 

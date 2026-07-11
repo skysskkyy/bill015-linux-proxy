@@ -34,6 +34,7 @@ class ToolCallRecord:
     call_type: str
     arguments: str
     index: int
+    batch_id: int | None = None
 
 
 @dataclass
@@ -48,6 +49,7 @@ class ToolOutputRecord:
     stdout_excerpt: str
     raw_chars: int
     index: int
+    batch_id: int | None = None
 
 
 @dataclass
@@ -68,17 +70,25 @@ def parse_tool_history(value: Any) -> ToolHistory:
 
     calls_by_id: dict[str, ToolCallRecord] = {}
     output_call_ids: set[str] = set()
+    current_batch_id = -1
+    previous_was_call = False
 
     for index, item in enumerate(value):
         if not isinstance(item, dict):
+            previous_was_call = False
             continue
         typ = str(item.get("type") or "")
         if typ in CALL_TYPES:
+            if not previous_was_call:
+                current_batch_id += 1
             record = _parse_call(item, index)
             if record:
+                record.batch_id = current_batch_id
                 history.calls.append(record)
                 calls_by_id[record.call_id] = record
+            previous_was_call = True
             continue
+        previous_was_call = False
         if typ in OUTPUT_TYPES:
             output = _parse_output(item, index, calls_by_id)
             if output:
@@ -88,14 +98,14 @@ def parse_tool_history(value: Any) -> ToolHistory:
             if typ == "tool_search_output":
                 history.exposed_deferred_tools.extend(_extract_deferred_tools(item.get("tools")))
 
-    history.latest_outputs = history.outputs[-3:]
+    history.latest_outputs = _latest_output_batch(history.outputs)
     history.pending_calls = [call for call in history.calls if call.call_id and call.call_id not in output_call_ids]
     history.failed_outputs = [out for out in history.outputs if out.success is False]
     history.successful_outputs = [out for out in history.outputs if out.success is True]
     return history
 
 
-def render_tool_feedback_for_model(history: ToolHistory) -> str:
+def render_tool_feedback_for_model(history: ToolHistory, *, max_tokens: int = 24_000) -> str:
     if not (
         history.calls
         or history.outputs
@@ -121,24 +131,30 @@ def render_tool_feedback_for_model(history: ToolHistory) -> str:
             ]
         )
 
-    for offset, output in enumerate(history.latest_outputs, start=1):
+    latest_outputs = history.latest_outputs
+    remaining_tokens = max(3_000, max_tokens - _estimate_tokens("\n".join(lines)))
+    for offset, output in enumerate(latest_outputs, start=1):
         call = _find_call(history.calls, output.call_id)
         status = _status_text(output.success)
+        outputs_left = max(1, len(latest_outputs) - offset + 1)
+        output_budget = max(500, remaining_tokens // outputs_left)
+        rendered_output = _clip_tokens_head_tail(output.stdout_excerpt or output.output, output_budget)
         lines.extend(
             [
                 "",
-                f"[{offset}] {output.name or '<unknown_tool>'} call_id={output.call_id or '<missing>'} status={status}",
+                f"[{offset}/{len(latest_outputs)}] {output.name or '<unknown_tool>'} call_id={output.call_id or '<missing>'} batch_id={output.batch_id if output.batch_id is not None else '<unknown>'} status={status}",
                 "arguments:",
-                _clip(call.arguments if call else "", 3000) or "<not available>",
+                _clip_tokens_head_tail(call.arguments if call else "", 900) or "<not available>",
                 "",
                 "result:",
                 _result_header(output),
-                "Key output:",
-                _clip(output.stdout_excerpt or output.output, 12000),
+                "Key output head/tail:",
+                rendered_output,
             ]
         )
+        remaining_tokens = max(0, max_tokens - _estimate_tokens("\n".join(lines)))
         if output.stderr_excerpt:
-            lines.extend(["", "Key error lines:", _clip(output.stderr_excerpt, 3000)])
+            lines.extend(["", "Key error lines:", _clip_tokens_head_tail(output.stderr_excerpt, 900)])
 
     if history.failed_outputs:
         lines.append("")
@@ -175,7 +191,7 @@ def render_tool_feedback_for_model(history: ToolHistory) -> str:
             "- If a tool failed, inspect the error and either retry with corrected arguments or explain the blocker.",
         ]
     )
-    return "\n".join(lines)
+    return _clip_tokens_head_tail("\n".join(lines), max_tokens)
 
 
 def is_repeated_call(name: str, arguments: str, recent_calls: list[ToolCallRecord]) -> bool:
@@ -253,6 +269,7 @@ def _parse_output(item: dict[str, Any], index: int, calls_by_id: dict[str, ToolC
         stdout_excerpt=stdout_excerpt,
         raw_chars=len(output_text),
         index=index,
+        batch_id=call.batch_id if call else None,
     )
 
 
@@ -340,8 +357,12 @@ def _stderr_excerpt(text: str, max_lines: int = 40) -> str:
 
 def _stdout_excerpt(text: str, max_lines: int = 100, max_chars: int = 12000) -> str:
     lines = (text or "").splitlines()
-    tail = "\n".join(lines[-max_lines:]) if lines else (text or "")
-    return _clip(tail, max_chars)
+    if len(lines) <= max_lines:
+        return _clip(text or "", max_chars)
+    head_count = max(1, max_lines // 3)
+    tail_count = max_lines - head_count
+    joined = "\n".join(lines[:head_count] + [f"...[omitted {len(lines) - max_lines} middle lines]..."] + lines[-tail_count:])
+    return _clip(joined, max_chars)
 
 
 def _result_header(output: ToolOutputRecord) -> str:
@@ -376,6 +397,26 @@ def _extract_deferred_tools(value: Any) -> list[dict[str, Any]]:
     return [tool for tool in value if isinstance(tool, dict)][-50:]
 
 
+def _latest_output_batch(outputs: list[ToolOutputRecord]) -> list[ToolOutputRecord]:
+    if not outputs:
+        return []
+    latest = outputs[-1]
+    if latest.batch_id is not None:
+        batch = [out for out in outputs if out.batch_id == latest.batch_id]
+        if batch:
+            return batch
+    # Fallback for legacy/unknown call IDs: preserve the latest contiguous
+    # output cluster instead of blindly slicing the last three.
+    cluster = [latest]
+    previous_index = latest.index
+    for out in reversed(outputs[:-1]):
+        if previous_index - out.index > 3:
+            break
+        cluster.append(out)
+        previous_index = out.index
+    return list(reversed(cluster))
+
+
 def _repeated_successful_calls(history: ToolHistory) -> list[ToolCallRecord]:
     successful_ids = {out.call_id for out in history.successful_outputs}
     seen: dict[tuple[str, str], ToolCallRecord] = {}
@@ -407,6 +448,25 @@ def _clip(text: str, max_chars: int) -> str:
     head = max_chars // 3
     tail = max_chars - head
     return text[:head] + f"\n...[truncated {len(text) - max_chars} chars]...\n" + text[-tail:]
+
+
+def _estimate_tokens(text: str) -> int:
+    text = str(text or "")
+    # Lightweight local estimate to avoid importing the full usage estimator and
+    # creating an unnecessary dependency edge. Chinese/CJK and JSON punctuation
+    # skew char counts, so use a conservative average.
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return max(1, int((len(text) - cjk) / 3.6) + cjk)
+
+
+def _clip_tokens_head_tail(text: str, max_tokens: int) -> str:
+    text = str(text or "")
+    if _estimate_tokens(text) <= max_tokens:
+        return text
+    max_chars = max(400, int(max_tokens * 3.2))
+    return _clip(text, max_chars)
 
 
 def _one_line(text: str, max_chars: int) -> str:

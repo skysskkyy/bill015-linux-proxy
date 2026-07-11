@@ -215,6 +215,60 @@ def test_latest_user_request_stays_first_after_tool_feedback():
     assert "Recent local Codex tool results" in content
     assert "Current user request:\n新问题：修复第二句话回答旧问题" in content
     assert content.index("新问题：修复第二句话回答旧问题") < content.index("旧问题：解释 bill015_local_proxy")
+    assert content.count("新问题：修复第二句话回答旧问题") == 1
+
+
+def test_latest_parallel_tool_batch_keeps_more_than_three_outputs():
+    from app.normalization import normalize_responses_request
+
+    input_items = [{"type": "message", "role": "user", "content": "run batch"}]
+    for idx in range(5):
+        input_items.append(
+            {
+                "type": "function_call",
+                "name": "shell_command",
+                "call_id": f"call_{idx}",
+                "arguments": f'{{"command":"echo marker-{idx}"}}',
+            }
+        )
+    for idx in range(5):
+        input_items.append(
+            {
+                "type": "function_call_output",
+                "call_id": f"call_{idx}",
+                "output": f"Exit code: 0\nOutput:\nmarker-{idx}",
+            }
+        )
+
+    n = normalize_responses_request({"model": "gpt-5.5", "input": input_items})
+
+    assert len(n.tool_history.latest_outputs) == 5
+    for idx in range(5):
+        assert f"marker-{idx}" in n.latest_tool_summary
+
+
+def test_budgeted_transcript_uses_current_and_tail_history_not_raw_char_prefix():
+    from app.normalization import normalize_responses_request
+
+    old = "OLD_HISTORY_START " + ("老历史 " * 20_000)
+    current = "CURRENT_UNIQUE_REQUEST"
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.5",
+            "max_output_tokens": 4096,
+            "input": [
+                {"type": "message", "role": "user", "content": old},
+                {"type": "message", "role": "assistant", "content": "middle"},
+                {"type": "message", "role": "user", "content": current},
+            ],
+        }
+    )
+    content = n.user_input
+
+    assert "current user message moved above" in content
+    assert current not in content
+    # The very old raw prefix should not dominate the token-budgeted transcript.
+    assert "OLD_HISTORY_START" not in content
 
 
 def test_strict_zero_blocks_auto_passthrough(monkeypatch):

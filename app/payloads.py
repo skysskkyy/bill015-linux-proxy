@@ -21,9 +21,13 @@ def _focused_user_content(n: NormalizedRequest) -> str:
         return n.user_input
     current = last_user_instruction(n.raw_input)
     transcript = n.user_input
-    if current and current.strip() and current.strip() not in transcript[: max(len(current) + 64, 512)]:
-        return "Current user request:\n" + current.strip() + "\n\n--- Native Codex conversation/context transcript ---\n" + transcript
     if current and current.strip():
+        # The budgeted transcript intentionally omits the latest user body when
+        # it is hoisted here. If a legacy transcript already starts with the
+        # same request, do not duplicate it.
+        prefix = transcript[: max(len(current) + 128, 768)]
+        if current.strip() in prefix:
+            return transcript
         return "Current user request:\n" + current.strip() + "\n\n--- Native Codex conversation/context transcript ---\n" + transcript
     return transcript
 
@@ -91,7 +95,7 @@ def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = setti
     user = (
         last_user_instruction(n.raw_input)
         + "\n\n--- Native Codex conversation transcript for compaction (structured, truncated locally if needed) ---\n"
-        + native_input_transcript(n.raw_input, max_chars=220000, include_context_roles=False)
+        + native_input_transcript(n.raw_input, max_tokens=64_000, include_context_roles=False)
     )
     payload: dict[str, Any] = {
         "model": n.model,
