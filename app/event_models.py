@@ -46,6 +46,24 @@ def response_event(event_type: str, sequence_number: int, **payload: Any) -> dic
     return event
 
 
+_FORBIDDEN_METADATA_KEYS = {
+    "safety_identifier",
+    "user",
+    "rate_limits",
+    "code_review_rate_limits",
+    "additional_rate_limits",
+    "credits",
+    "promo",
+    "openai_verification_recommendation",
+}
+
+
+def safe_response_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    return {str(k): v for k, v in metadata.items() if str(k) not in _FORBIDDEN_METADATA_KEYS}
+
+
 def make_response_object(
     rid: str,
     n: NormalizedRequest,
@@ -58,25 +76,51 @@ def make_response_object(
     error: dict[str, Any] | None = None,
     incomplete_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build a Codex Desktop-compatible Responses object.
+
+    The local proxy intentionally mirrors the stable, non-sensitive field shape
+    observed in real Codex Desktop `codex_api::sse::responses` logs. Do not
+    synthesize sensitive service-owned fields such as safety identifiers, real
+    rate limits, verification recommendations, or user identifiers.
+    """
     text_config = n.text_config or {"format": {"type": "text"}}
     if "format" not in text_config:
         text_config = {"format": {"type": "text"}, **text_config}
+
+    metadata = safe_response_metadata(n.metadata)
+    reasoning = n.reasoning or {}
+    created = created_at or int(time.time())
+    completed_at = created if status in {"completed", "failed", "incomplete", "cancelled"} else None
     return {
         "id": rid,
         "object": "response",
-        "created_at": created_at or int(time.time()),
+        "created_at": created,
         "status": status,
+        "background": False,
+        "completed_at": completed_at,
         "error": error,
         "incomplete_details": incomplete_details,
+        "instructions": None,
+        "max_output_tokens": n.max_output_tokens,
+        "max_tool_calls": None,
         "model": n.model,
         "output": output or [],
         "parallel_tool_calls": bool(n.parallel_tool_calls),
+        "previous_response_id": None,
+        "prompt_cache_key": n.prompt_cache_key,
+        "prompt_cache_retention": None,
+        "reasoning": reasoning,
+        "store": False,
+        "temperature": n.temperature,
+        "text": text_config,
         "tool_choice": n.tool_choice,
         "tools": [],
+        "tool_usage": None,
+        "top_p": None,
+        "truncation": "auto",
         "usage": build_response_usage(n, answer=answer, calls=calls),
-        "reasoning": n.reasoning,
-        "text": text_config,
-        "metadata": n.metadata or {},
+        "user": None,
+        "metadata": metadata,
     }
 
 

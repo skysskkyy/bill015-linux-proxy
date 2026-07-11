@@ -11,6 +11,7 @@ from .config import settings
 from .event_models import (
     EventContext,
     make_message_item,
+    make_reasoning_item,
     make_response_object,
     make_tool_call_item,
     message_item_id,
@@ -20,6 +21,7 @@ from .event_models import (
 )
 from .models import Bill015Result, BridgeToolCall, NormalizedRequest, local_response_id
 from .sse import encode_sse, split_text
+from .upstream_errors import error_message_from_detail
 
 TRUNCATION_MARKERS = (
     "[local proxy truncated answer at max_answer_chars]",
@@ -78,7 +80,7 @@ def response_object_with_tool_calls(
 
 
 def _message_part(answer: str) -> dict[str, Any]:
-    part: dict[str, Any] = {"type": "output_text", "text": answer}
+    part: dict[str, Any] = {"type": "output_text", "text": answer, "logprobs": []}
     if settings.responses_emit_annotations:
         part["annotations"] = []
     return part
@@ -104,10 +106,19 @@ class ResponsesEventStream:
             self.event("response.in_progress", response=created),
         ]
 
+    def metadata_events(self) -> list[bytes]:
+        metadata = _stream_metadata(self.n)
+        if not metadata:
+            return []
+        return [self.event("response.metadata", response_id=self.rid, metadata=metadata)]
+
+    def keepalive_event(self) -> bytes:
+        return self.event("keepalive")
+
     def message_events(self, answer: str, *, output_index: int = 0) -> list[bytes]:
         item_id = message_item_id(self.rid, output_index)
-        final_part = {"type": "output_text", "text": answer}
-        initial_part = {"type": "output_text", "text": ""}
+        final_part = {"type": "output_text", "text": answer, "logprobs": []}
+        initial_part = {"type": "output_text", "text": "", "logprobs": []}
         if settings.responses_emit_annotations:
             final_part["annotations"] = []
             initial_part["annotations"] = []
@@ -121,7 +132,7 @@ class ResponsesEventStream:
             [
                 self.event("response.output_text.done", item_id=item_id, output_index=output_index, content_index=0, text=answer, logprobs=[]),
                 self.event("response.content_part.done", item_id=item_id, output_index=output_index, content_index=0, part=final_part),
-                self.event("response.output_item.done", output_index=output_index, item=make_message_item(item_id, "completed", [final_part])),
+                self.event("response.output_item.done", output_index=output_index, item_id=item_id, item=make_message_item(item_id, "completed", [final_part])),
             ]
         )
         return events
@@ -132,7 +143,7 @@ class ResponsesEventStream:
         item_id = reasoning_item_id(self.rid, output_index)
         part = {"type": "summary_text", "text": summary}
         events = [
-            self.event("response.output_item.added", output_index=output_index, item={"id": item_id, "type": "reasoning", "status": "in_progress", "summary": []}),
+            self.event("response.output_item.added", output_index=output_index, item=make_reasoning_item(item_id, "in_progress", [])),
             self.event("response.reasoning_summary_part.added", item_id=item_id, output_index=output_index, summary_index=0, part={"type": "summary_text", "text": ""}),
         ]
         for chunk in split_text(summary, settings.responses_chunk_size):
@@ -141,7 +152,7 @@ class ResponsesEventStream:
             [
                 self.event("response.reasoning_summary_text.done", item_id=item_id, output_index=output_index, summary_index=0, text=summary),
                 self.event("response.reasoning_summary_part.done", item_id=item_id, output_index=output_index, summary_index=0, part=part),
-                self.event("response.output_item.done", output_index=output_index, item={"id": item_id, "type": "reasoning", "status": "completed", "summary": [part]}),
+                self.event("response.output_item.done", output_index=output_index, item_id=item_id, item=make_reasoning_item(item_id, "completed", [part])),
             ]
         )
         return events
@@ -158,7 +169,7 @@ class ResponsesEventStream:
             pass
         else:
             events.extend(self._function_call_argument_events(call, item_id, output_index))
-        events.append(self.event("response.output_item.done", output_index=output_index, item=tool_call_item(call, item_id, "completed")))
+        events.append(self.event("response.output_item.done", output_index=output_index, item_id=item_id, item=tool_call_item(call, item_id, "completed")))
         return events
 
     def completed_tool_response(self, calls: list[BridgeToolCall]) -> bytes:
@@ -206,6 +217,8 @@ async def responses_sse_generator(result_coro, n: NormalizedRequest, rid: str | 
     try:
         for chunk in stream.created_events():
             yield chunk
+        for chunk in stream.metadata_events():
+            yield chunk
 
         task = asyncio.ensure_future(result_coro)
         heartbeat_seconds = max(0.05, settings.client_heartbeat_interval_ms / 1000)
@@ -218,7 +231,10 @@ async def responses_sse_generator(result_coro, n: NormalizedRequest, rid: str | 
             # while the local bridge is waiting for emit_value arguments.
             # SSE comments are valid protocol frames and are ignored by the
             # Responses event parser.
-            yield b": keep-alive\n\n"
+            if settings.responses_typed_keepalive:
+                yield stream.keepalive_event()
+            else:
+                yield b": keep-alive\n\n"
         result: Bill015Result = task.result()
         result.local_request_id = rid
         if result.bridge_mode == "tool_call" and result.tool_calls:
@@ -254,6 +270,19 @@ async def responses_sse_generator(result_coro, n: NormalizedRequest, rid: str | 
         yield b"data: [DONE]\n\n"
 
 
+def _stream_metadata(n: NormalizedRequest) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for source in (n.metadata, n.client_metadata):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                if key in {"safety_identifier", "user", "rate_limits", "credits", "openai_verification_recommendation"}:
+                    continue
+                if value in (None, "", [], {}):
+                    continue
+                metadata[str(key)] = value
+    return metadata
+
+
 def _status_for_answer(answer: str) -> tuple[str, dict[str, Any] | None]:
     if settings.responses_emit_incomplete_on_truncation and any(marker in (answer or "") for marker in TRUNCATION_MARKERS):
         return "incomplete", {"reason": "max_output_tokens"}
@@ -262,8 +291,12 @@ def _status_for_answer(answer: str) -> tuple[str, dict[str, Any] | None]:
 
 def _error_object(error: HTTPException) -> dict[str, Any]:
     code = error.status_code
-    return {
+    err: dict[str, Any] = {
         "code": "local_proxy_error",
-        "message": str(error.detail),
+        "message": error_message_from_detail(error.detail),
         "type": "invalid_request_error" if 400 <= code < 500 else "server_error",
     }
+    if isinstance(error.detail, dict) and "upstream_status" in error.detail:
+        err["code"] = "upstream_error"
+        err["upstream_status"] = error.detail.get("upstream_status")
+    return err

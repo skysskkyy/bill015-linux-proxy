@@ -2,6 +2,24 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.3.2] - 2026-07-12
+
+### Added
+- Upgraded the BILL-015 `emit_value.tool_calls` contract from a generic text-only tool directory to a per-turn, dynamically generated typed `oneOf` schema.
+- Each advertised Codex/local/MCP tool now gets exact `type` / `namespace` / `name` enums and native parameter schemas under `arguments`, while preserving legacy JSON-string parsing compatibility.
+
+### Tests
+- Added regression coverage proving typed tool schemas are embedded in the upstream payload and structured object arguments still resolve into native Codex tool calls.
+
+## [0.3.1] - 2026-07-12
+
+### Changed
+- Added guarded upstream retries for pre-stream `HTTP 5xx`, `do_request_failed`, and transient network failures.
+- Retries are skipped after any upstream SSE event is observed to preserve the early-abort/BILL-015 semantics.
+
+### Tests
+- Added coverage for pre-stream retry behavior and sanitized stream failure handling.
+
 ## [0.3.0] - 2026-07-10
 
 ### Changed

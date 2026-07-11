@@ -51,11 +51,14 @@
     "allow_web_search_call_event": false,
     "emit_incomplete_on_truncation": true,
     "strict_sequence_numbers": true,
+    "typed_keepalive": false,
     "chunk_size": 256
   },
   "limits": {
     "max_concurrency": 2,
     "max_request_bytes": 1048576,
+    "upstream_retries": 2,
+    "upstream_retry_backoff_ms": 700,
     "args_done_timeout_ms": 60000,
     "upstream_idle_timeout_ms": 30000,
     "circuit_failures": 0,

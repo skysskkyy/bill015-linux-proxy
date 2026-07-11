@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from copy import deepcopy
 from typing import Any
 
 from .config import Settings, settings
@@ -155,6 +156,188 @@ def summarize_client_tools(tools: Any, max_tools: int = 30) -> str:
     catalog, _ = build_client_tool_catalog(tools, max_chars=30_000)
     return catalog
 
+
+def build_typed_tool_call_schema(
+    tool_registry: dict[str, dict[str, Any]] | None,
+    *,
+    allow_generic_fallback: bool = False,
+    max_tools: int = 96,
+) -> dict[str, Any]:
+    """Build the JSON-schema item type for emit_value.tool_calls.
+
+    Older bridge prompts exposed the native Codex tool directory only as text
+    and asked the upstream model to place a JSON string in ``arguments``.  This
+    keeps parsing compatibility, but gives the model a much weaker target than
+    native Codex: every tool looks like the same generic object.
+
+    This schema turns the per-turn tool registry into a typed oneOf catalogue:
+    each native tool gets an exact ``name``/``namespace`` enum and its native
+    parameters schema under ``arguments``.  The parser still accepts legacy
+    JSON-string arguments, but new upstream calls are guided toward structured
+    objects that match the actual local tool.
+    """
+    variants = _typed_tool_call_variants(tool_registry or {}, max_tools=max_tools)
+    if not variants:
+        return _generic_tool_call_schema()
+    if allow_generic_fallback:
+        variants = [*variants, _generic_tool_call_schema()]
+    return {"oneOf": variants}
+
+
+def _typed_tool_call_variants(registry: dict[str, dict[str, Any]], *, max_tools: int) -> list[dict[str, Any]]:
+    variants: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    specs = sorted(
+        (spec for spec in registry.values() if isinstance(spec, dict)),
+        key=lambda spec: (str(spec.get("namespace") or ""), str(spec.get("output_name") or ""), str(spec.get("raw_type") or "")),
+    )
+    for spec in specs:
+        namespace = str(spec.get("namespace") or "")
+        output_name = str(spec.get("output_name") or "").strip()
+        raw_type = str(spec.get("raw_type") or spec.get("call_type") or "function")
+        if not output_name:
+            continue
+        key = (namespace, output_name, raw_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        variants.append(_typed_tool_call_variant(spec, namespace=namespace, output_name=output_name, raw_type=raw_type))
+        if len(variants) >= max_tools:
+            break
+    return variants
+
+
+def _typed_tool_call_variant(spec: dict[str, Any], *, namespace: str, output_name: str, raw_type: str) -> dict[str, Any]:
+    call_type = str(spec.get("call_type") or "function")
+    if raw_type == "custom" or output_name == "apply_patch":
+        call_type = "custom"
+    elif raw_type in {"tool_search", "web_search"}:
+        call_type = raw_type
+
+    properties: dict[str, Any] = {
+        "type": {"type": "string", "enum": [call_type]},
+        "namespace": {"type": "string", "enum": [namespace]},
+        "name": {"type": "string", "enum": [output_name]},
+        "arguments": _arguments_schema_for_spec(spec, call_type=call_type, raw_type=raw_type),
+        "input": _input_schema_for_spec(call_type),
+    }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["type", "namespace", "name", "arguments", "input"],
+        "additionalProperties": False,
+    }
+
+
+def _arguments_schema_for_spec(spec: dict[str, Any], *, call_type: str, raw_type: str) -> dict[str, Any]:
+    if call_type == "custom":
+        return _empty_object_schema()
+    raw_schema = spec.get("schema") if isinstance(spec.get("schema"), dict) else {}
+    parameters = raw_schema.get("parameters") if isinstance(raw_schema, dict) else {}
+    if raw_type == "web_search":
+        # Bridge web_search intent to local tool_search semantics.  The parser
+        # accepts this shape and rewrites it into a client-side tool_search call.
+        parameters = {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search/fetch request to satisfy locally via Codex tools."},
+                "limit": {"type": "integer", "description": "Maximum local discovery results."},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        }
+    if not isinstance(parameters, dict) or not parameters:
+        return _empty_object_schema()
+    return _stricten_json_schema(parameters)
+
+
+def _input_schema_for_spec(call_type: str) -> dict[str, Any]:
+    if call_type == "custom":
+        return {"type": "string", "description": "Raw FREEFORM/custom tool input. For apply_patch this is the full patch text."}
+    return {"type": "string", "enum": [""], "description": "Must be empty for non-custom/function tools."}
+
+
+def _empty_object_schema() -> dict[str, Any]:
+    return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+
+
+def _generic_tool_call_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["auto", "function", "custom", "tool_search", "web_search"]},
+            "namespace": {"type": "string"},
+            "name": {"type": "string"},
+            "arguments": {
+                "type": "string",
+                "description": "Legacy fallback: JSON string arguments matching the requested tool schema.",
+            },
+            "input": {"type": "string"},
+        },
+        "required": ["type", "namespace", "name", "arguments", "input"],
+        "additionalProperties": False,
+    }
+
+
+def _stricten_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Make nested tool parameter schemas safer for strict function outputs."""
+    out = deepcopy(schema)
+    if not isinstance(out, dict):
+        return _empty_object_schema()
+    _stricten_schema_node(out)
+    if out.get("type") != "object":
+        out = {"type": "object", "properties": {"value": out}, "required": ["value"], "additionalProperties": False}
+    out.setdefault("properties", {})
+    out.setdefault("required", list((out.get("properties") or {}).keys()))
+    out.setdefault("additionalProperties", False)
+    return out
+
+
+def _stricten_schema_node(node: Any) -> None:
+    if isinstance(node, list):
+        for item in node:
+            _stricten_schema_node(item)
+        return
+    if not isinstance(node, dict):
+        return
+    if node.get("type") == "object" or isinstance(node.get("properties"), dict):
+        properties = node.setdefault("properties", {})
+        if isinstance(properties, dict):
+            original_required = {str(k) for k in node.get("required", [])}
+            for prop_name, prop_schema in properties.items():
+                if str(prop_name) not in original_required:
+                    _make_nullable_schema(prop_schema)
+            node["required"] = list(dict.fromkeys([str(k) for k in node.get("required", [])] + [str(k) for k in properties.keys()]))
+        node.setdefault("additionalProperties", False)
+    for key in ("properties", "$defs", "definitions"):
+        child = node.get(key)
+        if isinstance(child, dict):
+            for value in child.values():
+                _stricten_schema_node(value)
+    for key in ("items", "additionalProperties"):
+        _stricten_schema_node(node.get(key))
+    for key in ("anyOf", "oneOf", "allOf"):
+        _stricten_schema_node(node.get(key))
+
+
+def _make_nullable_schema(node: Any) -> None:
+    if not isinstance(node, dict):
+        return
+    typ = node.get("type")
+    if isinstance(typ, str):
+        if typ != "null":
+            node["type"] = [typ, "null"]
+        return
+    if isinstance(typ, list):
+        if "null" not in typ:
+            node["type"] = [*typ, "null"]
+        return
+    enum = node.get("enum")
+    if isinstance(enum, list) and None not in enum:
+        node["enum"] = [*enum, None]
+        return
+    if not any(key in node for key in ("anyOf", "oneOf", "allOf")):
+        node["anyOf"] = [{"type": "null"}, deepcopy(node)]
 
 
 def _json_object(value: Any) -> dict[str, Any]:

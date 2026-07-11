@@ -125,6 +125,8 @@ class Settings:
     max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 2))
     # 0 means disabled/infinite. Positive values are enforced by upstream.py.
     upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 120.0))
+    upstream_retries: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRIES", "limits.upstream_retries", 2))
+    upstream_retry_backoff_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRY_BACKOFF_MS", "limits.upstream_retry_backoff_ms", 700))
     args_done_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_ARGS_DONE_TIMEOUT_MS", "limits.args_done_timeout_ms", 60000))
     upstream_idle_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_IDLE_TIMEOUT_MS", "limits.upstream_idle_timeout_ms", 30000))
     client_heartbeat_interval_ms: int = field(default_factory=lambda: _env_int("BILL015_CLIENT_HEARTBEAT_INTERVAL_MS", "limits.client_heartbeat_interval_ms", 5000))
@@ -149,6 +151,7 @@ class Settings:
     responses_allow_web_search_call_event: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_ALLOW_WEB_SEARCH_CALL_EVENT", "responses_events.allow_web_search_call_event", False))
     responses_emit_incomplete_on_truncation: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_EMIT_INCOMPLETE_ON_TRUNCATION", "responses_events.emit_incomplete_on_truncation", True))
     responses_strict_sequence_numbers: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_STRICT_SEQUENCE_NUMBERS", "responses_events.strict_sequence_numbers", True))
+    responses_typed_keepalive: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_TYPED_KEEPALIVE", "responses_events.typed_keepalive", False))
     responses_chunk_size: int = field(default_factory=lambda: _env_int("BILL015_RESPONSES_CHUNK_SIZE", "responses_events.chunk_size", 256))
     tool_bridge_allow_unknown_tools: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_ALLOW_UNKNOWN_TOOLS", "tool_bridge.allow_unknown_tools", True))
 

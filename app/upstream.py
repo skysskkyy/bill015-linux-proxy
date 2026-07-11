@@ -16,6 +16,7 @@ from .sse import SSEEvent, parse_async_sse_lines
 from .tool_bridge import parse_function_arguments
 from .tool_history import is_repeated_successful_call
 from .upstream_client import http_timeout, upstream_auth_headers
+from .upstream_errors import sanitize_upstream_error_detail
 from .usage_estimator import usage_estimate_dict
 
 
@@ -26,6 +27,29 @@ def _args_done_deadline(cfg: Settings = settings) -> float | None:
 def _raise_if_args_done_timed_out(deadline: float | None) -> None:
     if deadline is not None and time.perf_counter() > deadline:
         raise HTTPException(status_code=504, detail="timed out waiting for response.function_call_arguments.done")
+
+
+def _retry_delay_seconds(attempt: int, cfg: Settings = settings) -> float:
+    base_ms = max(0, cfg.upstream_retry_backoff_ms)
+    if base_ms <= 0:
+        return 0
+    # attempt is zero-based for the failed try. Cap so a flaky upstream does not
+    # freeze the local Codex stream for too long.
+    return min(5.0, (base_ms / 1000.0) * (2 ** attempt))
+
+
+def _upstream_detail_text(detail: Any) -> str:
+    try:
+        return json.dumps(detail, ensure_ascii=False)
+    except Exception:
+        return str(detail)
+
+
+def _is_retryable_pre_stream_failure(status_code: int | None, detail: Any = None) -> bool:
+    if status_code is not None and 500 <= status_code <= 599:
+        return True
+    text = _upstream_detail_text(detail).lower()
+    return "do_request_failed" in text or "upstream error" in text
 
 
 def collect_bill015_result_from_events(events: Iterable[SSEEvent], n: NormalizedRequest, cfg: Settings = settings) -> Bill015Result:
@@ -97,6 +121,8 @@ def audit_from_result(result: Bill015Result, n: NormalizedRequest, mode: str, fa
         "bridge_mode": result.bridge_mode,
         "tool_calls": [{"id": c.id, "name": c.name, "namespace": c.namespace, "requested_name": c.requested_name, "type": c.call_type, "arguments_chars": len(c.arguments)} for c in result.tool_calls],
         "duration_ms": result.duration_ms,
+        "retry_count": result.retry_count,
+        "retry_reasons": result.retry_reasons,
         "fallback_used": fallback_used,
         "error": result.error,
         "event_sequence": result.event_sequence[-50:],
@@ -171,62 +197,94 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
     args_done_deadline = _args_done_deadline(cfg)
     headers = upstream_auth_headers(stream=True, cfg=cfg)
     try:
+        max_retries = max(0, int(getattr(cfg, "upstream_retries", 0)))
         async with httpx.AsyncClient(timeout=http_timeout(cfg)) as client:
-            async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=payload) as resp:
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    raise HTTPException(status_code=502, detail={"upstream_status": resp.status_code, "body": body[:2000].decode("utf-8", errors="replace")})
-                async for ev in parse_async_sse_lines(resp.aiter_lines()):
-                    _raise_if_args_done_timed_out(args_done_deadline)
-                    obj = ev.json
-                    typ = (obj or {}).get("type") or ev.event
-                    if typ:
-                        result.event_sequence.append(str(typ))
-                    if not obj:
-                        if ev.data == "[DONE]":
-                            result.upstream_completed_seen = True
+            for attempt in range(max_retries + 1):
+                args_buffer = []
+                answer_buffer = []
+                args_done_deadline = _args_done_deadline(cfg)
+                attempt_event_len = len(result.event_sequence)
+                try:
+                    async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=payload) as resp:
+                        if resp.status_code != 200:
+                            body = await resp.aread()
+                            detail = sanitize_upstream_error_detail(
+                                resp.status_code,
+                                body,
+                                content_type=resp.headers.get("content-type", ""),
+                            )
+                            if attempt < max_retries and _is_retryable_pre_stream_failure(resp.status_code, detail):
+                                result.retry_count += 1
+                                reason = f"http_{resp.status_code}"
+                                result.retry_reasons.append(reason)
+                                result.event_sequence.append(f"retry:{reason}")
+                                await asyncio.sleep(_retry_delay_seconds(attempt, cfg))
+                                continue
+                            raise HTTPException(status_code=502, detail=detail)
+                        async for ev in parse_async_sse_lines(resp.aiter_lines()):
+                            _raise_if_args_done_timed_out(args_done_deadline)
+                            obj = ev.json
+                            typ = (obj or {}).get("type") or ev.event
+                            if typ:
+                                result.event_sequence.append(str(typ))
+                            if not obj:
+                                if ev.data == "[DONE]":
+                                    result.upstream_completed_seen = True
+                                continue
+                            if typ == "response.created":
+                                response = obj.get("response") if isinstance(obj.get("response"), dict) else {}
+                                result.upstream_response_id = response.get("id") or obj.get("response_id") or obj.get("id")
+                            elif typ == "response.output_item.added":
+                                item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+                                if item.get("type") in {"function_call", "tool_call"} or item.get("name") == cfg.function_name:
+                                    result.function_call_seen = True
+                                else:
+                                    result.function_call_seen = result.function_call_seen or (cfg.function_name in json.dumps(obj, ensure_ascii=False))
+                            elif typ == "response.function_call_arguments.delta":
+                                delta = obj.get("delta")
+                                if isinstance(delta, str):
+                                    args_buffer.append(delta)
+                            elif typ == "response.output_text.delta":
+                                delta = obj.get("delta")
+                                if isinstance(delta, str):
+                                    answer_buffer.append(delta)
+                            elif typ == "response.output_text.done":
+                                text = obj.get("text")
+                                if isinstance(text, str):
+                                    result.answer = text
+                            elif typ == "response.function_call_arguments.done":
+                                final_args = obj.get("arguments") if isinstance(obj.get("arguments"), str) else "".join(args_buffer)
+                                result.raw_arguments = final_args
+                                result.args_done_seen = True
+                                result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry)
+                                await resp.aclose()
+                                result.aborted = True
+                                break
+                            elif typ == "response.completed":
+                                result.upstream_completed_seen = True
+                                if not result.answer and answer_buffer:
+                                    result.answer = "".join(answer_buffer)
+                                break
+                            elif typ == "response.incomplete":
+                                result.error = "upstream response incomplete"
+                                if not result.answer and answer_buffer:
+                                    result.answer = "".join(answer_buffer)
+                                break
+                            elif typ in {"response.failed", "error"}:
+                                raise RuntimeError(json.dumps(obj, ensure_ascii=False)[:2000])
+                    break
+                except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.PoolTimeout, httpx.TimeoutException) as e:
+                    # Retry only if this attempt failed before yielding any
+                    # upstream SSE event. Once the model has started streaming,
+                    # retrying could duplicate work or affect billing.
+                    if attempt < max_retries and len(result.event_sequence) == attempt_event_len:
+                        result.retry_count += 1
+                        reason = type(e).__name__
+                        result.retry_reasons.append(reason)
+                        result.event_sequence.append(f"retry:{reason}")
+                        await asyncio.sleep(_retry_delay_seconds(attempt, cfg))
                         continue
-                    if typ == "response.created":
-                        response = obj.get("response") if isinstance(obj.get("response"), dict) else {}
-                        result.upstream_response_id = response.get("id") or obj.get("response_id") or obj.get("id")
-                    elif typ == "response.output_item.added":
-                        item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
-                        if item.get("type") in {"function_call", "tool_call"} or item.get("name") == cfg.function_name:
-                            result.function_call_seen = True
-                        else:
-                            result.function_call_seen = result.function_call_seen or (cfg.function_name in json.dumps(obj, ensure_ascii=False))
-                    elif typ == "response.function_call_arguments.delta":
-                        delta = obj.get("delta")
-                        if isinstance(delta, str):
-                            args_buffer.append(delta)
-                    elif typ == "response.output_text.delta":
-                        delta = obj.get("delta")
-                        if isinstance(delta, str):
-                            answer_buffer.append(delta)
-                    elif typ == "response.output_text.done":
-                        text = obj.get("text")
-                        if isinstance(text, str):
-                            result.answer = text
-                    elif typ == "response.function_call_arguments.done":
-                        final_args = obj.get("arguments") if isinstance(obj.get("arguments"), str) else "".join(args_buffer)
-                        result.raw_arguments = final_args
-                        result.args_done_seen = True
-                        result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry)
-                        await resp.aclose()
-                        result.aborted = True
-                        break
-                    elif typ == "response.completed":
-                        result.upstream_completed_seen = True
-                        if not result.answer and answer_buffer:
-                            result.answer = "".join(answer_buffer)
-                        break
-                    elif typ == "response.incomplete":
-                        result.error = "upstream response incomplete"
-                        if not result.answer and answer_buffer:
-                            result.answer = "".join(answer_buffer)
-                        break
-                    elif typ in {"response.failed", "error"}:
-                        raise RuntimeError(json.dumps(obj, ensure_ascii=False)[:2000])
+                    raise
         if mode == "verify":
             await asyncio.sleep(0.5)
             result.verify_post = await fetch_user_self(cfg)

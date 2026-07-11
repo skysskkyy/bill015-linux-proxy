@@ -65,6 +65,8 @@ class Bill015Result:
     malformed_function_args: bool = False
     repaired_args: bool = False
     duration_ms: int = 0
+    retry_count: int = 0
+    retry_reasons: list[str] = field(default_factory=list)
     event_sequence: list[str] = field(default_factory=list)
     error: str | None = None
     verify_pre: dict[str, Any] | None = None

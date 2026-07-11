@@ -67,12 +67,15 @@ class ResponsesEventsConfig(StrictConfigModel):
     allow_web_search_call_event: bool | None = None
     emit_incomplete_on_truncation: bool | None = None
     strict_sequence_numbers: bool | None = None
+    typed_keepalive: bool | None = None
     chunk_size: int | None = None
 
 
 class LimitsConfig(StrictConfigModel):
     max_concurrency: int | None = None
     max_request_bytes: int | None = None
+    upstream_retries: int | None = None
+    upstream_retry_backoff_ms: int | None = None
     args_done_timeout_ms: int | None = None
     upstream_idle_timeout_ms: int | None = None
     circuit_failures: int | None = None

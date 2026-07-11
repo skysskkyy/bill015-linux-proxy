@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import copy
+import time
 from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import HTTPException
 
 from .config import Settings, settings
+from .models import local_response_id
 from .sse import encode_sse
+from .upstream_errors import error_message_from_detail, sanitize_upstream_error_detail
 
 
 def http_timeout(cfg: Settings = settings) -> httpx.Timeout | None:
@@ -43,6 +46,54 @@ def prepare_passthrough_payload(body: dict[str, Any], cfg: Settings = settings) 
     return payload
 
 
+def _passthrough_failed_events(status_code: int, detail: dict[str, Any], body: dict[str, Any], cfg: Settings) -> list[bytes]:
+    message = error_message_from_detail(detail)
+    error = {
+        "code": "upstream_error",
+        "message": message,
+        "type": "server_error" if status_code >= 500 else "invalid_request_error",
+        "upstream_status": detail.get("upstream_status", status_code),
+    }
+    rid = local_response_id()
+    now = int(time.time())
+    response = {
+        "id": rid,
+        "object": "response",
+        "created_at": now,
+        "status": "failed",
+        "background": False,
+        "completed_at": now,
+        "error": error,
+        "incomplete_details": None,
+        "instructions": None,
+        "max_output_tokens": body.get("max_output_tokens"),
+        "max_tool_calls": None,
+        "model": str(body.get("model") or cfg.default_model),
+        "output": [],
+        "parallel_tool_calls": bool(body.get("parallel_tool_calls", True)),
+        "previous_response_id": body.get("previous_response_id") if isinstance(body.get("previous_response_id"), str) else None,
+        "prompt_cache_key": body.get("prompt_cache_key") if isinstance(body.get("prompt_cache_key"), str) else None,
+        "prompt_cache_retention": None,
+        "reasoning": body.get("reasoning") if isinstance(body.get("reasoning"), dict) else {},
+        "store": bool(body.get("store", False)),
+        "temperature": body.get("temperature"),
+        "text": body.get("text") if isinstance(body.get("text"), dict) else {"format": {"type": "text"}},
+        "tool_choice": body.get("tool_choice", "auto"),
+        "tools": body.get("tools") if isinstance(body.get("tools"), list) else [],
+        "tool_usage": None,
+        "top_p": body.get("top_p"),
+        "truncation": body.get("truncation", "auto"),
+        "usage": None,
+        "user": None,
+        "metadata": body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+    }
+    return [
+        encode_sse({"type": "response.failed", "response": response, "sequence_number": 0}, "response.failed"),
+        encode_sse({"type": "error", "error": error, "sequence_number": 1}, "error"),
+        b"data: [DONE]\n\n",
+    ]
+
+
 async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) -> AsyncIterator[bytes]:
     if not cfg.upstream_api_key:
         yield encode_sse({"type": "error", "error": {"message": f"Missing upstream API key env {cfg.upstream_api_key_env}"}}, "error")
@@ -58,18 +109,13 @@ async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) 
             ) as resp:
                 if resp.status_code != 200:
                     body_bytes = await resp.aread()
-                    yield encode_sse(
-                        {
-                            "type": "error",
-                            "error": {
-                                "message": body_bytes[:2000].decode("utf-8", errors="replace"),
-                                "upstream_status": resp.status_code,
-                                "type": "upstream_error",
-                            },
-                        },
-                        "error",
+                    detail = sanitize_upstream_error_detail(
+                        resp.status_code,
+                        body_bytes,
+                        content_type=resp.headers.get("content-type", ""),
                     )
-                    yield b"data: [DONE]\n\n"
+                    for event in _passthrough_failed_events(resp.status_code, detail, body, cfg):
+                        yield event
                     return
                 async for chunk in resp.aiter_bytes():
                     yield chunk
@@ -90,7 +136,17 @@ async def normal_forward_json(body: dict[str, Any], cfg: Settings = settings) ->
     try:
         obj = r.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"upstream_status": r.status_code, "body": r.text[:2000]}) from e
+        raise HTTPException(
+            status_code=502,
+            detail=sanitize_upstream_error_detail(
+                r.status_code,
+                r.text,
+                content_type=r.headers.get("content-type", ""),
+            ),
+        ) from e
     if r.status_code < 200 or r.status_code >= 300:
-        raise HTTPException(status_code=r.status_code, detail={"upstream_status": r.status_code, "body": obj})
+        raise HTTPException(
+            status_code=r.status_code,
+            detail=sanitize_upstream_error_detail(r.status_code, obj, preserve_json_body=True),
+        )
     return obj
