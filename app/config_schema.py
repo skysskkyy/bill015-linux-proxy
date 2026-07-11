@@ -36,6 +36,7 @@ class Bill015Config(StrictConfigModel):
     answer_field: str | None = None
     max_output_tokens: int | None = None
     max_answer_chars: int | None = None
+    strict_zero: bool | None = None
 
 
 class LoggingConfig(StrictConfigModel):

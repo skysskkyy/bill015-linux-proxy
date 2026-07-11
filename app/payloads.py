@@ -140,7 +140,7 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         )
     user_content = _focused_user_content(n)
     if n.latest_tool_summary:
-        user_content = n.latest_tool_summary + "\n\n--- Conversation / user request ---\n" + n.user_input
+        user_content = n.latest_tool_summary + "\n\n--- Current request and native conversation/context transcript ---\n" + user_content
     payload: dict[str, Any] = {
         "model": n.model,
         "stream": True,

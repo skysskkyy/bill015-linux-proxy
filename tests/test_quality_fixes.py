@@ -152,6 +152,54 @@ def test_emit_value_schema_embeds_typed_tool_oneof():
     assert calls[0].arguments == '{"command": "pwd", "timeout_ms": 10000}'
 
 
+def test_latest_user_request_stays_first_after_tool_feedback():
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.5",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "旧问题：解释 bill015_local_proxy"}]},
+                {"type": "function_call", "name": "shell_command", "call_id": "call_1", "arguments": "{\"command\":\"pwd\"}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "Exit code: 0\nOutput:\nS:\\hack\\packyapi.com"},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "新问题：修复第二句话回答旧问题"}]},
+            ],
+        }
+    )
+
+    content = build_bill015_payload(n)["input"][1]["content"]
+
+    assert "Recent local Codex tool results" in content
+    assert "Current user request:\n新问题：修复第二句话回答旧问题" in content
+    assert content.index("新问题：修复第二句话回答旧问题") < content.index("旧问题：解释 bill015_local_proxy")
+
+
+def test_strict_zero_blocks_auto_passthrough(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.config import settings
+    from app.main import app
+    from app.state import runtime_state
+
+    monkeypatch.setattr(settings, "mode", "exploit")
+    monkeypatch.setattr(settings, "strict_zero", True)
+    runtime_state.current_mode_override = None
+
+    client = TestClient(app)
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.4",
+            "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AA=="}]}],
+            "stream": False,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "strict_zero blocked auto-passthrough" in response.text
+
+
 def test_config_schema_reports_unknown_fields():
     from app.config_schema import validate_local_config
 
@@ -316,6 +364,7 @@ def test_execute_bill015_retries_pre_stream_http_500(monkeypatch):
     monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
     monkeypatch.setattr(settings, "upstream_retries", 2)
     monkeypatch.setattr(settings, "upstream_retry_backoff_ms", 0)
+    monkeypatch.setattr(settings, "strict_zero", False)
     monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
 
     n = NormalizedRequest(model="gpt-test", instructions="", user_input="Return OK", want_stream=False, client_api="responses", is_primary_path=True)

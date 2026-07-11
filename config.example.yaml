@@ -24,6 +24,7 @@ bill015:
   answer_field: answer
   max_output_tokens: 2048
   max_answer_chars: 16384
+  strict_zero: true
 
 logging:
   dir: S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence

@@ -11,6 +11,7 @@
 - 已实现审计日志、脱敏、日志轮转、并发限制、超时、简单熔断
 - `0.3.1` 起：exploit/verify 模式对上游预流式 `HTTP 5xx` / `do_request_failed` / 网络抖动做安全重试；一旦已收到上游 SSE 事件则不重试，避免重复执行或影响 abort 语义。
 - `0.3.2` 起：上游 `emit_value` 的 `tool_calls` 不再只靠文本工具目录，而是按本轮 Codex 工具动态生成强类型 `oneOf` schema，约束工具名、namespace 和参数结构。
+- `0.3.3` 起：默认启用 `bill015.strict_zero=true`，直接阻断 `auto-passthrough` / `normal` 这类可能产生真实扣费的路径；同时修复带工具结果的后续提问里“第二句话被旧问题盖住”的排序问题。
 - 本阶段不做 Codex 配置接入
 
 ## 本地配置
@@ -54,7 +55,10 @@ S:\hack\packyapi.com\bill015_local_proxy\config.local.example.json
     "cookie": "",
     "user_id": "192833"
   },
-  "mode": "exploit"
+  "mode": "exploit",
+  "bill015": {
+    "strict_zero": true
+  }
 }
 ```
 
@@ -101,7 +105,7 @@ python -m ruff check app scripts tests
 
 - `exploit`：强制 function-call，收到 `response.function_call_arguments.done` 后关闭上游，再本地重组 Responses 输出。
 - `dry-run`：不请求上游，返回将要构造的脱敏请求摘要。
-- `normal`：普通转发 `/v1/responses` 到上游，不主动 abort。
+- `normal`：普通转发 `/v1/responses` 到上游，不主动 abort。`bill015.strict_zero=true` 时会被拒绝。
 - `verify`：同 exploit，并在配置 `upstream.cookie` 后尝试记录 `/api/user/self` pre/post delta。
 
 切换模式：
@@ -140,6 +144,16 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 
 日志不记录完整上游 API key/Cookie；默认不记录 prompt，也默认不记录 answer；如需本地留存回答，可在 `config.local.json` 里将 `logging.store_answers` 改为 `true`。
 
+## 严格不扣量模式
+
+默认配置 `bill015.strict_zero=true` 会 fail-closed：
+
+- 阻断 `auto-passthrough`：例如图片/文件等当前桥接层无法安全 early-abort 的原生请求，不再偷偷普通转发上游。
+- 阻断 `normal` 模式：防止运行时误切换到普通转发。
+- 禁用上游重试：避免一次用户请求产生第二次真实上游生成尝试。
+
+如果你明确要牺牲“不扣量”来换原生多媒体/文件能力，再手动改成 `false`。
+
 ## 502 / 上游 500 稳定性
 
 如果上游偶发返回 `HTTP 500`、`do_request_failed`，本地代理会在**尚未收到任何上游 SSE 事件**时自动重试：
@@ -158,4 +172,4 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 "retry_reasons": ["http_500"]
 ```
 
-重试只发生在预流式失败阶段；如果已经收到模型输出、function-call 参数或其他 SSE 事件，则不会重试。
+重试只发生在预流式失败阶段；如果已经收到模型输出、function-call 参数或其他 SSE 事件，则不会重试。注意：`bill015.strict_zero=true` 时会禁用重试。

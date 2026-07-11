@@ -2,6 +2,16 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.3.3] - 2026-07-12
+
+### Fixed
+- Added `bill015.strict_zero` fail-closed mode, enabled by default, to block `auto-passthrough` and `normal` forwarding paths that can create billable/non-aborted upstream calls on unexpected models.
+- In strict-zero mode, upstream retries are disabled so a transient failure cannot accidentally create a second upstream generation attempt.
+- Fixed tool-followup prompt construction so the latest user request remains pinned before older transcript content even when recent tool output is injected.
+
+### Tests
+- Added regressions for strict-zero passthrough blocking and latest-user-request priority after tool feedback.
+
 ## [0.3.2] - 2026-07-12
 
 ### Added

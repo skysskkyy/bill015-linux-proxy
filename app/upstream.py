@@ -113,6 +113,8 @@ def audit_from_result(result: Bill015Result, n: NormalizedRequest, mode: str, fa
         "mode": mode,
         "client_api": n.client_api,
         "model": n.model,
+        "original_model": n.original_model,
+        "strict_zero": settings.strict_zero,
         "function_call_seen": result.function_call_seen,
         "args_done_seen": result.args_done_seen,
         "upstream_completed_seen": result.upstream_completed_seen,
@@ -197,7 +199,7 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
     args_done_deadline = _args_done_deadline(cfg)
     headers = upstream_auth_headers(stream=True, cfg=cfg)
     try:
-        max_retries = max(0, int(getattr(cfg, "upstream_retries", 0)))
+        max_retries = 0 if cfg.strict_zero else max(0, int(getattr(cfg, "upstream_retries", 0)))
         async with httpx.AsyncClient(timeout=http_timeout(cfg)) as client:
             for attempt in range(max_retries + 1):
                 args_buffer = []

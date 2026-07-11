@@ -133,6 +133,7 @@ async def healthz() -> dict[str, Any]:
         "host": settings.host,
         "port": settings.port,
         "max_concurrency": settings.max_concurrency,
+        "strict_zero": settings.strict_zero,
         "config_warnings": getattr(settings, "config_warnings", []),
         "metrics": runtime_state.snapshot(),
     }
@@ -209,6 +210,24 @@ async def handle_responses_body(body: dict[str, Any]):
 
     needs_passthrough, passthrough_reason = request_needs_passthrough(body)
     if mode in {"exploit", "verify"} and needs_passthrough:
+        if settings.strict_zero:
+            runtime_state.inc_request()
+            runtime_state.mark_error(f"strict_zero blocked auto-passthrough: {passthrough_reason}")
+            audit_logger.write({
+                "local_request_id": local_response_id(),
+                "mode": "passthrough-blocked",
+                "client_api": "responses",
+                "model": n.model,
+                "reason": passthrough_reason,
+                "prompt_chars": len(n.user_input),
+            })
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "strict_zero blocked auto-passthrough because this request needs native upstream "
+                    f"passthrough ({passthrough_reason}). This prevents accidental billable/non-aborted calls."
+                ),
+            )
         runtime_state.inc_request()
         runtime_state.mark_fallback()
         audit_logger.write({
@@ -224,6 +243,17 @@ async def handle_responses_body(body: dict[str, Any]):
         return JSONResponse(await normal_forward_json(body))
 
     if mode == "normal":
+        if settings.strict_zero:
+            runtime_state.inc_request()
+            runtime_state.mark_error("strict_zero blocked normal forwarding")
+            audit_logger.write({
+                "local_request_id": local_response_id(),
+                "mode": "normal-blocked",
+                "client_api": "responses",
+                "model": n.model,
+                "prompt_chars": len(n.user_input),
+            })
+            raise HTTPException(status_code=409, detail="strict_zero blocked normal forwarding; use exploit/verify BILL-015 bridge mode.")
         runtime_state.inc_request()
         runtime_state.mark_fallback()
         audit_logger.write({"local_request_id": local_response_id(), "mode": "normal", "client_api": "responses", "model": n.model, "prompt_chars": len(n.user_input)})
@@ -285,6 +315,8 @@ async def admin_mode(request: Request, authorization: str | None = Header(defaul
     mode = str(body.get("mode", "")).strip().lower()
     if mode not in {"exploit", "verify", "normal", "dry-run"}:
         raise HTTPException(status_code=400, detail="mode must be exploit/verify/normal/dry-run")
+    if settings.strict_zero and mode == "normal":
+        raise HTTPException(status_code=400, detail="strict_zero forbids normal mode because it forwards billable upstream calls")
     runtime_state.current_mode_override = mode
     audit_logger.write({"admin_action": "mode", "mode": mode})
     return {"ok": True, "mode": mode}
