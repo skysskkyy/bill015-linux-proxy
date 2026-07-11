@@ -107,7 +107,17 @@ def test_unknown_tools_disabled_by_default_without_local_config(tmp_path):
     env.pop("BILL015_TOOL_BRIDGE_ALLOW_UNKNOWN_TOOLS", None)
 
     proc = subprocess.run(
-        [sys.executable, "-c", "from app.config import settings; print(settings.tool_bridge_allow_unknown_tools)"],
+        [
+            sys.executable,
+            "-c",
+            (
+                "from app.config import settings; "
+                "print(settings.tool_bridge_allow_unknown_tools, settings.max_output_tokens, "
+                "settings.compaction_max_output_tokens, settings.max_answer_chars, "
+                "settings.upstream_timeout_seconds, settings.args_done_timeout_ms, "
+                "settings.upstream_idle_timeout_ms, settings.upstream_retries)"
+            ),
+        ],
         cwd=os.getcwd(),
         env=env,
         text=True,
@@ -116,7 +126,7 @@ def test_unknown_tools_disabled_by_default_without_local_config(tmp_path):
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == "False"
+    assert proc.stdout.strip() == "False 8192 8192 65536 300.0 300000 180000 0"
 
 
 def test_strict_unknown_tool_schema_disables_tool_calls_without_registry(monkeypatch):
@@ -192,6 +202,32 @@ def test_emit_value_schema_embeds_typed_tool_oneof():
     )
     assert mode == "tool_call"
     assert calls[0].arguments == '{"command": "pwd", "timeout_ms": 10000}'
+
+
+def test_payload_output_budgets_and_compaction_budget(monkeypatch):
+    from app.config import settings
+    from app.models import NormalizedRequest
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "max_output_tokens", 8192)
+    monkeypatch.setattr(settings, "compaction_max_output_tokens", 4096)
+
+    n = normalize_responses_request({"model": "gpt-5.5", "input": "write a long patch", "max_output_tokens": 20000})
+    assert build_bill015_payload(n)["max_output_tokens"] == 8192
+
+    comp = NormalizedRequest(
+        model="gpt-5.5",
+        instructions="",
+        user_input="compact",
+        want_stream=True,
+        client_api="responses",
+        is_primary_path=True,
+        is_compaction=True,
+        raw_input="compact",
+        max_output_tokens=20000,
+    )
+    assert build_bill015_payload(comp)["max_output_tokens"] == 4096
 
 
 def test_latest_user_request_stays_first_after_tool_feedback():

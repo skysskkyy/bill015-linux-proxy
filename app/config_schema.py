@@ -35,6 +35,7 @@ class Bill015Config(StrictConfigModel):
     function_name: str | None = None
     answer_field: str | None = None
     max_output_tokens: int | None = None
+    compaction_max_output_tokens: int | None = None
     max_answer_chars: int | None = None
     strict_zero: bool | None = None
 

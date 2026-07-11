@@ -14,6 +14,7 @@
 - `0.3.3` 起：默认启用 `bill015.strict_zero=true`，直接阻断 `auto-passthrough` / `normal` 这类可能产生真实扣费的路径；同时修复带工具结果的后续提问里“第二句话被旧问题盖住”的排序问题。
 - `0.3.4` 起：默认关闭未知工具 `tool_bridge.allow_unknown_tools=false`；未出现在当前 Codex 工具 registry 的工具会被丢弃，缺工具时先走 `tool_search` 暴露工具。
 - `0.3.5` 起：上下文按 token 预算和优先级组织，不再按大字符数硬截断；最新用户请求去重置顶，最近并行工具批次完整保留并做 head/tail 摘要。
+- `0.3.6` 起：默认提升输出/等待预算：普通输出 8192、compaction 输出 8192、answer 缓冲 65536、上游总等待 300s、args_done 300s、idle 180s，默认不重试。
 - 本阶段不做 Codex 配置接入
 
 ## 本地配置
@@ -186,9 +187,31 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 
 旧历史不再按固定字符数从头硬塞；长输出也会保留退出码、错误线和 head/tail 关键内容，避免最近工具批次超过 3 个时丢结果。
 
+## 输出与等待预算
+
+默认预算面向长答案、补丁和 JSON function arguments：
+
+```json
+"bill015": {
+  "max_output_tokens": 8192,
+  "compaction_max_output_tokens": 8192,
+  "max_answer_chars": 65536
+},
+"upstream": {
+  "timeout_seconds": 300
+},
+"limits": {
+  "args_done_timeout_ms": 300000,
+  "upstream_idle_timeout_ms": 180000,
+  "upstream_retries": 0
+}
+```
+
+如果要做超长重构/长补丁，可以临时把 `bill015.max_output_tokens` 和 `bill015.compaction_max_output_tokens` 调到 `16384`。
+
 ## 502 / 上游 500 稳定性
 
-如果上游偶发返回 `HTTP 500`、`do_request_failed`，本地代理会在**尚未收到任何上游 SSE 事件**时自动重试：
+默认 `upstream_retries=0`，避免一次用户请求产生多次真实上游尝试。如果你明确要牺牲严格不扣量语义来换稳定性，可手动开启预流式失败重试：
 
 ```json
 "limits": {

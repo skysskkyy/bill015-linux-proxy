@@ -10,7 +10,7 @@
     "api_key": "PASTE_YOUR_KEY_HERE",
     "cookie": "",
     "user_id": "192833",
-    "timeout_seconds": 120
+    "timeout_seconds": 300
   },
   "mode": "exploit",
   "model": {
@@ -26,9 +26,10 @@
   "bill015": {
     "function_name": "emit_value",
     "answer_field": "answer",
-    "max_output_tokens": 2048,
-    "max_answer_chars": 16384,
-    "strict_zero": true
+    "max_output_tokens": 8192,
+    "max_answer_chars": 65536,
+    "strict_zero": true,
+    "compaction_max_output_tokens": 8192
   },
   "logging": {
     "dir": "S:\\hack\\packyapi.com\\bill015_local_proxy\\proxy_evidence",
@@ -58,10 +59,10 @@
   "limits": {
     "max_concurrency": 2,
     "max_request_bytes": 1048576,
-    "upstream_retries": 2,
+    "upstream_retries": 0,
     "upstream_retry_backoff_ms": 700,
-    "args_done_timeout_ms": 60000,
-    "upstream_idle_timeout_ms": 30000,
+    "args_done_timeout_ms": 300000,
+    "upstream_idle_timeout_ms": 180000,
     "circuit_failures": 0,
     "client_heartbeat_interval_ms": 5000
   },

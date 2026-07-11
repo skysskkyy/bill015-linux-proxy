@@ -2,6 +2,17 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.3.6] - 2026-07-12
+
+### Changed
+- Raised default normal `bill015.max_output_tokens` from 2048 to 8192 and `bill015.max_answer_chars` from 16384 to 65536 for long answers, patches, and JSON function arguments.
+- Added independent `bill015.compaction_max_output_tokens`, defaulting to 8192, so compaction no longer shares the normal output cap implicitly.
+- Raised default wait budgets: upstream total timeout 300s, `args_done_timeout_ms` 300000, and upstream idle timeout 180000.
+- Defaulted `upstream_retries` to 0 to avoid multiple real upstream attempts under strict-zero usage.
+
+### Tests
+- Added regression coverage for default budget values and compaction-specific output capping.
+
 ## [0.3.5] - 2026-07-12
 
 ### Changed

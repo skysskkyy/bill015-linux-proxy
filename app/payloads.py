@@ -78,11 +78,11 @@ def build_emit_value_schema(
     }
 
 def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dict[str, Any]:
-    max_tokens = n.max_output_tokens or cfg.max_output_tokens
+    max_tokens = n.max_output_tokens or cfg.compaction_max_output_tokens
     try:
-        max_tokens = min(max(int(max_tokens), 1024), max(cfg.max_output_tokens, 2048))
+        max_tokens = min(max(int(max_tokens), 1024), max(cfg.compaction_max_output_tokens, 2048))
     except Exception:
-        max_tokens = cfg.max_output_tokens
+        max_tokens = cfg.compaction_max_output_tokens
     system = (
         f"You must call {cfg.function_name} exactly once. Never output normal text. "
         "This is a native Codex CONTEXT CHECKPOINT COMPACTION request. "
