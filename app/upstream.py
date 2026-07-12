@@ -21,11 +21,15 @@ from .usage_estimator import usage_estimate_dict
 
 
 def apply_tool_loop_guard(result: Bill015Result, n: NormalizedRequest) -> None:
-    """Prevent known-bad local tool loops from producing another Codex tool turn.
+    """Apply native-like, non-terminal loop hygiene.
 
-    This does not change strict_zero or cause passthrough.  It only converts a
-    repeated local tool request into a final local answer so the client stops
-    spinning when the upstream bridge model ignored recent tool feedback.
+    Native Codex does not surface a synthetic "[loop guard]" final message just
+    because the model repeated a tool call. Tool call/output items stay in
+    history and the next turn can continue from them.  The proxy should
+    therefore avoid user-visible hard stops: drop only redundant already
+    successful calls from a mixed batch, and let any remaining different action
+    proceed. If the whole batch is redundant, keep the most recent call so the
+    client/tool loop continues instead of ending the task mid-flight.
     """
     if result.bridge_mode != "tool_call" or not result.tool_calls or not n.tool_history:
         return
@@ -35,25 +39,19 @@ def apply_tool_loop_guard(result: Bill015Result, n: NormalizedRequest) -> None:
         if is_repeated_successful_call(c.name, c.arguments, n.tool_history)
     ]
     if repeated_success:
+        repeated_ids = {id(c) for c in repeated_success}
+        remaining = [c for c in result.tool_calls if id(c) not in repeated_ids]
         names = ", ".join(_tool_label(c) for c in repeated_success[:5])
-        result.bridge_mode = "answer"
-        result.tool_calls = []
-        result.answer = (
-            "[local proxy loop guard] The model requested a local tool call that already succeeded "
-            f"with the same arguments ({names}). I stopped the loop; inspect the latest tool result "
-            "above and continue with a different action or final answer."
-        )
+        result.retry_reasons.append(f"filtered_repeated_success:{names}")
+        if remaining:
+            result.tool_calls = remaining
+            return
+        result.retry_reasons.append(f"allowed_repeated_success_to_avoid_abort:{names}")
         return
 
     if n.latest_tool_failed and _repeats_latest_failed_tool(result.tool_calls, n.tool_history):
         names = ", ".join(_tool_label(c) for c in result.tool_calls[:5])
-        result.bridge_mode = "answer"
-        result.tool_calls = []
-        result.answer = (
-            "[local proxy loop guard] The model repeated a tool after the latest failure "
-            f"({names}). I stopped the loop to avoid another slow no-op turn; use the failure output "
-            "above to choose a corrected command/patch or report the blocker."
-        )
+        result.retry_reasons.append(f"repeated_failed_tool_allowed:{names}")
 
 
 def _tool_label(call: Any) -> str:

@@ -283,7 +283,8 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         + " exactly once; never emit normal assistant text outside that function call. "
         "Direct final answer: mode='answer', answer=<final text>, tool_calls=[]. "
         "Need local action: mode='tool_call', answer=<optional brief progress/commentary text>, tool_calls=[...]. "
-        "When native Codex would say a short preamble before commands (for example what it is checking or changing), put that preamble in answer; leave answer empty only for purely mechanical/obvious follow-up calls. "
+        "When native Codex would say a short preamble before commands (for example what it is checking or changing), put that preamble in answer. "
+        "Do not repeat the same progress sentence across tool turns; after a phase has already been announced, leave answer empty for routine follow-up tool calls. "
         "Function tool: name=exact catalog name, arguments=JSON string matching that tool's parameter schema. "
         "Namespace/MCP tool: namespace='mcp__...' or 'codex_app', name=subtool. "
         "Custom/FREEFORM tool such as apply_patch: type='custom', input=raw payload, arguments='{}'. "
@@ -304,7 +305,7 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
             "\n\nCodex native tool catalog for this turn (lossless JSON; use exact names/namespaces from here; local proxy validates requested tools against this registry):\n"
             + n.tools_catalog
             + "\n\nFile-edit policy: if the catalog includes apply_patch and the task is to modify text/source/config files, call apply_patch directly with a minimal patch. Do not call shell_command, node_repl, or PowerShell just to write those files. If apply_patch fails, inspect the error and retry once with corrected patch grammar before falling back."
-            + "\n\nIf a needed browser/computer/plugin/MCP tool is not listed directly but tool_search is listed, request tool_search first with a broad query. Do not repeat tool_search once tool_search_output has exposed a suitable exact tool. For browser/session work prefer queries containing: playwright browser navigate evaluate tabs network requests cookies localStorage sessionStorage DOM JavaScript; chrome browser current tab cookies localStorage; node_repl js; jshook call_tool route_tool activate_tools hook network intercept memory. For any namespace entry, prefer its native_call fields over a flattened name."
+            + "\n\nIf a needed browser/computer/plugin/MCP tool is not listed directly but tool_search is listed, request tool_search first with a broad query. Do not repeat tool_search once tool_search_output has exposed a suitable exact tool; call the exposed exact tool or answer from the latest result. For browser/session work prefer queries containing: playwright browser navigate evaluate tabs network requests cookies localStorage sessionStorage DOM JavaScript; chrome browser current tab cookies localStorage; node_repl js; jshook call_tool route_tool activate_tools hook network intercept memory. For any namespace entry, prefer its native_call fields over a flattened name."
         )
     else:
         instructions += (

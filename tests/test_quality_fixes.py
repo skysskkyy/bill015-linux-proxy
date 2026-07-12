@@ -283,7 +283,7 @@ def test_emit_value_schema_is_upstream_compatible_and_tools_are_validated_locall
     assert calls[0].arguments == '{"command": "pwd", "timeout_ms": 10000}'
 
 
-def test_loop_guard_stops_repeated_successful_tool_call():
+def test_loop_guard_does_not_abort_repeated_successful_tool_call():
     from app.models import Bill015Result
     from app.normalization import normalize_responses_request
     from app.sse import parse_sse_lines
@@ -324,9 +324,41 @@ def test_loop_guard_stops_repeated_successful_tool_call():
     result = collect_bill015_result_from_events(events, n)
 
     assert isinstance(result, Bill015Result)
-    assert result.bridge_mode == "answer"
-    assert result.tool_calls == []
-    assert "loop guard" in result.answer
+    assert result.bridge_mode == "tool_call"
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "shell_command"
+    assert "loop guard" not in result.answer
+    assert any("allowed_repeated_success_to_avoid_abort" in reason for reason in result.retry_reasons)
+
+
+def test_loop_guard_filters_repeated_success_from_mixed_batch():
+    from app.models import BridgeToolCall, Bill015Result
+    from app.normalization import normalize_responses_request
+    from app.upstream import apply_tool_loop_guard
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "tool_search_call", "call_id": "call_search", "execution": "client", "arguments": {"query": "browser tools", "limit": 8}},
+                {"type": "tool_search_output", "call_id": "call_search", "execution": "client", "status": "completed", "tools": []},
+            ],
+        }
+    )
+    result = Bill015Result(
+        local_request_id="resp_local_mixed_loop",
+        bridge_mode="tool_call",
+        tool_calls=[
+            BridgeToolCall(id="call_repeat", name="tool_search", arguments='{"query":"browser tools","limit":8}', call_type="tool_search"),
+            BridgeToolCall(id="call_next", name="js", namespace="mcp__node_repl", arguments='{"code":"1+1"}'),
+        ],
+    )
+
+    apply_tool_loop_guard(result, n)
+
+    assert result.bridge_mode == "tool_call"
+    assert [(call.namespace, call.name) for call in result.tool_calls] == [("mcp__node_repl", "js")]
+    assert any("filtered_repeated_success:tool_search" in reason for reason in result.retry_reasons)
 
 
 def test_loop_guard_allows_corrected_retry_after_failed_tool_name():
@@ -377,8 +409,9 @@ def test_loop_guard_stops_exact_failed_tool_replay():
 
     apply_tool_loop_guard(result, n)
 
-    assert result.bridge_mode == "answer"
-    assert result.tool_calls == []
+    assert result.bridge_mode == "tool_call"
+    assert result.tool_calls
+    assert any("repeated_failed_tool_allowed" in reason for reason in result.retry_reasons)
 
 
 def test_tool_search_auto_expansion_is_disabled_by_default():
