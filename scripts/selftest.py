@@ -64,6 +64,9 @@ def main() -> None:
 
     r = client.post("/v1/responses/compact", json={"model":"gpt-5.5","input":"compact me","stream":False})
     assert_true(r.status_code == 200 and "CONTEXT CHECKPOINT COMPACTION" in json.dumps(r.json(), ensure_ascii=False), "/v1/responses/compact dry-run failed")
+    compact_json = r.json()
+    assert_true("output" in compact_json and isinstance(compact_json["output"], list) and "object" not in compact_json, "/v1/responses/compact must return native compact output JSON")
+    assert_true(compact_json["output"][0]["type"] == "message" and compact_json["output"][0]["content"][0]["type"] == "output_text", "/v1/responses/compact output item shape wrong")
     print("[ok] /v1/responses/compact compatibility")
 
     n = normalize_responses_request({"model": "gpt-5.5", "input": [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}], "stream": True})
@@ -96,10 +99,10 @@ def main() -> None:
     assert_true(comp_n.is_compaction and comp_n.request_kind == "compaction", "compaction detection failed")
     assert_true("<skills_instructions>" in comp_n.instructions, "developer/skills context not preserved")
     comp_payload = build_bill015_payload(comp_n)
-    assert_true("CONTEXT CHECKPOINT COMPACTION" in comp_payload["input"][0]["content"], "compaction system prompt missing")
+    assert_true("CONTEXT CHECKPOINT COMPACTION" in comp_payload["instructions"], "compaction system prompt missing")
     assert_true("<skills_instructions>" in json.dumps(comp_payload, ensure_ascii=False), "compaction did not forward native developer/skills context")
-    assert_true("Do not request tools" in comp_payload["input"][0]["content"], "compaction tool prohibition missing")
-    assert_true("Codex native tool catalog" not in comp_payload["input"][0]["content"], "compaction included normal tool catalog")
+    assert_true("Do not request tools" in comp_payload["instructions"], "compaction tool prohibition missing")
+    assert_true("Codex native tool catalog" not in comp_payload["instructions"], "compaction included normal tool catalog")
     assert_true(comp_n.estimated_input_tokens > 0, "usage estimate missing")
     assert_true(comp_n.usage_estimate.cached_tokens >= int(comp_n.usage_estimate.input_tokens * 0.80), "compaction cached usage too low")
     print("[ok] native compaction/skills preservation")
@@ -140,7 +143,7 @@ def main() -> None:
     assert_true("Exit code: 0" in shell_loop_n.latest_tool_summary, "shell exit code missing from tool feedback")
     assert_true(shell_loop_n.latest_tool_failed is False, "successful shell marked failed")
     shell_payload = build_bill015_payload(shell_loop_n)
-    assert_true("Recent local Codex tool results" in shell_payload["input"][1]["content"], "tool feedback not injected into user content")
+    assert_true("Recent local Codex tool results" in shell_payload["input"][0]["content"] and shell_payload["input"][-1]["content"].startswith("Current user request:"), "tool feedback/current request layout wrong")
     print("[ok] shell_command tool-loop feedback")
 
     patch_loop_n = normalize_responses_request({
@@ -230,8 +233,7 @@ def main() -> None:
     assert_true(
         mcp_mode == "tool_call"
         and mcp_pairs == [("mcp__playwright", "browser_tabs"), ("mcp__jshook", "call_tool"), ("mcp__node_repl", "js")]
-        and "playwright browser navigate evaluate" in mcp_search_queries
-        and "jshook call_tool" in mcp_search_queries,
+        and not mcp_search_queries,
         "generic MCP namespace parser/deferred expansion failed",
     )
     _, _, _, web_rewrite_mode, web_rewrite_calls = parse_function_arguments(json.dumps({
@@ -246,7 +248,7 @@ def main() -> None:
         "tool_calls":[{"type":"tool_search","name":"tool_search","arguments":"{\"query\":\"Playwright browser cookies DOM network tools\",\"limit\":8}","input":""}],
     }), tool_registry=registry)
     browser_queries = "\n".join(c.arguments for c in browser_calls if c.call_type == "tool_search")
-    assert_true(browser_mode == "tool_call" and len([c for c in browser_calls if c.call_type == "tool_search"]) >= 3 and "node_repl" in browser_queries and "jshook" in browser_queries, "browser/MCP tool_search expansion failed")
+    assert_true(browser_mode == "tool_call" and len([c for c in browser_calls if c.call_type == "tool_search"]) <= 2 and "playwright browser navigate evaluate" in browser_queries, "browser/MCP tool_search expansion failed")
     deferred_n = normalize_responses_request({"model":"gpt-5.5","input":[{"type":"tool_search_output","call_id":"call_ts","status":"completed","execution":"client","tools":[{"type":"namespace","name":"mcp__node_repl","tools":[{"type":"function","name":"js","parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":False}}]}]}],"tools":tools})
     assert_true("mcp__node_repl.js" in deferred_n.tools_catalog and "js" in deferred_n.tool_registry, "deferred tool_search_output tools not cataloged")
     assert_true("mcp__node_repl.js" in deferred_n.latest_tool_summary, "deferred tools missing from tool feedback")
@@ -267,7 +269,7 @@ def main() -> None:
         return "".join(chunks)
 
     stream_text = asyncio.run(collect_tool_stream())
-    assert_true("response.custom_tool_call_input.delta" in stream_text and '"type":"custom_tool_call"' in stream_text and "response.function_call_arguments.done" in stream_text, "native tool stream events missing")
+    assert_true("response.custom_tool_call_input.delta" in stream_text and "response.function_call_arguments.delta" in stream_text and '"type":"custom_tool_call"' in stream_text, "native tool stream events missing")
     assert_true('"namespace":"mcp__playwright"' in stream_text and '"name":"browser_tabs"' in stream_text and '"name":"mcp__playwright.browser_tabs"' not in stream_text, "native MCP namespace stream format wrong")
     assert_true('"type":"tool_search_call"' in stream_text and '"execution":"client"' in stream_text, "native tool_search_call stream missing")
     assert_true('"type":"web_search_call"' not in stream_text, "web_search should be rewritten to local tool_search, not emitted as web_search_call")
@@ -277,7 +279,8 @@ def main() -> None:
     tool_objs = [ev.json for ev in tool_events if ev.json]
     assert_true([obj["sequence_number"] for obj in tool_objs] == list(range(len(tool_objs))), "Responses sequence_number not contiguous")
     added_indexes = [obj["output_index"] for obj in tool_objs if obj["type"] == "response.output_item.added"]
-    assert_true(added_indexes == [0, 1, 2, 3, 4], "parallel output_index sequence wrong")
+    done_indexes = [obj["output_index"] for obj in tool_objs if obj["type"] == "response.output_item.done"]
+    assert_true(added_indexes == [0, 1, 2, 3, 4] and done_indexes == [0, 1, 2, 3, 4], "parallel output_index sequence wrong")
     completed = [obj for obj in tool_objs if obj["type"] == "response.completed"][-1]["response"]
     assert_true(len(completed["output"]) == 5 and completed["output"][0]["type"] == "custom_tool_call" and completed["output"][2]["namespace"] == "mcp__playwright" and completed["output"][3]["type"] == "tool_search_call", "completed output items wrong")
     assert_true({"error", "incomplete_details", "reasoning", "text", "metadata"}.issubset(completed.keys()), "completed response native fields missing")
@@ -293,8 +296,8 @@ def main() -> None:
 
     message_events = list(parse_sse_lines(asyncio.run(collect_message_stream()).splitlines(True)))
     message_types = [ev.json["type"] for ev in message_events if ev.json]
-    assert_true(message_types[:4] == ["response.created", "response.in_progress", "response.output_item.added", "response.content_part.added"], "message lifecycle prefix wrong")
-    assert_true("response.output_text.delta" in message_types and "response.output_text.done" in message_types and message_types[-1] == "response.completed", "message lifecycle missing events")
+    assert_true(message_types[:2] == ["response.created", "response.output_item.added"], "message lifecycle prefix wrong")
+    assert_true("response.output_text.delta" in message_types and "response.output_item.done" in message_types and message_types[-1] == "response.completed", "message lifecycle missing events")
     assert_true(message_events[-1].data == "[DONE]", "message stream missing DONE")
     print("[ok] native Responses message lifecycle")
 

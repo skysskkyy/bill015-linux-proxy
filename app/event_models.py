@@ -106,7 +106,7 @@ def make_response_object(
         "model": n.model,
         "output": output or [],
         "parallel_tool_calls": bool(n.parallel_tool_calls),
-        "previous_response_id": None,
+        "previous_response_id": n.previous_response_id,
         "prompt_cache_key": n.prompt_cache_key,
         "prompt_cache_retention": None,
         "reasoning": reasoning,
@@ -198,7 +198,7 @@ def make_function_call_item(call: BridgeToolCall, item_id: str, status: str = "c
 
 
 def make_custom_tool_call_item(call: BridgeToolCall, item_id: str, status: str = "completed") -> dict[str, Any]:
-    return {
+    item = {
         "id": item_id,
         "type": "custom_tool_call",
         "status": status,
@@ -206,6 +206,9 @@ def make_custom_tool_call_item(call: BridgeToolCall, item_id: str, status: str =
         "name": call.name,
         "input": call.arguments if status == "completed" else "",
     }
+    if call.namespace:
+        item["namespace"] = call.namespace
+    return item
 
 
 def make_tool_search_call_item(call: BridgeToolCall, item_id: str, status: str = "completed") -> dict[str, Any]:

@@ -163,25 +163,22 @@ def build_typed_tool_call_schema(
     allow_generic_fallback: bool = False,
     max_tools: int = 96,
 ) -> dict[str, Any]:
-    """Build the JSON-schema item type for emit_value.tool_calls.
+    """Build an upstream-compatible item schema for emit_value.tool_calls.
 
-    Older bridge prompts exposed the native Codex tool directory only as text
-    and asked the upstream model to place a JSON string in ``arguments``.  This
-    keeps parsing compatibility, but gives the model a much weaker target than
-    native Codex: every tool looks like the same generic object.
+    We previously embedded a per-tool ``oneOf`` schema here.  That improved
+    local guidance, but Packy/New API rejects function schemas containing
+    ``oneOf`` under array items for several models:
 
-    This schema turns the per-turn tool registry into a typed oneOf catalogue:
-    each native tool gets an exact ``name``/``namespace`` enum and its native
-    parameters schema under ``arguments``.  The parser still accepts legacy
-    JSON-string arguments, but new upstream calls are guided toward structured
-    objects that match the actual local tool.
+        Invalid schema ... ('properties', 'tool_calls', 'items'), 'oneOf' is not permitted
+
+    Tool calls therefore became impossible whenever the native Codex registry
+    was non-empty.  Keep the function schema deliberately simple and put the
+    exact tool catalogue in the high-priority prompt instead; the local parser
+    still validates every requested name against ``tool_registry`` before
+    emitting native Codex tool-call events.
     """
-    variants = _typed_tool_call_variants(tool_registry or {}, max_tools=max_tools)
-    if not variants:
-        return _generic_tool_call_schema()
-    if allow_generic_fallback:
-        variants = [*variants, _generic_tool_call_schema()]
-    return {"oneOf": variants}
+    _ = (tool_registry, allow_generic_fallback, max_tools)
+    return _generic_tool_call_schema()
 
 
 def _typed_tool_call_variants(registry: dict[str, dict[str, Any]], *, max_tools: int) -> list[dict[str, Any]]:
@@ -393,8 +390,11 @@ def resolve_bridge_tool_call(
     requested_type = str(call.get("type") or call.get("call_type") or "auto").lower()
     registry = tool_registry or {}
     spec = _resolve_tool_spec(raw_name, raw_namespace, registry)
+    discovery_request = raw_name == "tool_search" or requested_type == "tool_search"
     if not spec and not cfg.tool_bridge_allow_unknown_tools:
-        return None
+        if not discovery_request:
+            return None
+        spec = {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}
     fallback_namespace, fallback_name = _split_namespace_name(raw_name, raw_namespace)
     if raw_namespace:
         fallback_namespace = raw_namespace
@@ -533,9 +533,10 @@ def expand_deferred_tool_searches(
     In exploit/emit_value mode the upstream model does not participate in
     Codex's native deferred-tool search loop directly. A narrow query such as
     "Playwright" often exposes only tabs/network tools. When a turn is clearly
-    about browser/MCP/jshook/node tooling, append several broad native
-    tool_search calls so Codex reveals the same families of tools it would make
-    discoverable in a normal session.
+    about browser/MCP/jshook/node tooling, append one broad native
+    tool_search call so Codex reveals the next useful family without flooding
+    the local tool loop. Older versions appended up to five extra searches,
+    which made Codex spend many turns discovering tools instead of editing.
     """
     if not calls:
         return calls
@@ -544,12 +545,10 @@ def expand_deferred_tool_searches(
         return calls
 
     existing_searches = [c for c in calls if c.call_type == "tool_search" or c.name == "tool_search"]
-    namespace_calls = [c for c in calls if (c.namespace or "").startswith("mcp__") or c.namespace == "codex_app"]
-    if not existing_searches and not namespace_calls:
+    if not existing_searches:
         return calls
 
     combined = " ".join(_tool_search_query(c).lower() for c in existing_searches)
-    combined += " " + " ".join(((c.namespace or "") + " " + c.name).lower() for c in namespace_calls)
     trigger_words = (
         "browser", "playwright", "chrome", "jshook", "mcp", "node", "node_repl",
         "cookie", "localstorage", "sessionstorage", "dom", "javascript", "network",
@@ -572,11 +571,7 @@ def expand_deferred_tool_searches(
         if query.lower() in seen:
             continue
         out.append(_make_tool_search_call(query))
-        seen.add(query.lower())
-        # Cap added discovery calls. One original + five broad searches is enough
-        # to reveal Browser/Chrome/Node/jshook families without flooding Codex.
-        if sum(1 for c in out if c.call_type == "tool_search" or c.name == "tool_search") >= 6:
-            break
+        break
     return out
 
 def parse_function_arguments(

@@ -173,7 +173,7 @@ def _context_token_budget(body: dict[str, Any], usage_input_tokens: int, cfg: Se
     return max(8_000, min(80_000, total_budget - output_reserve - overhead_reserve, usage_input_tokens + 12_000))
 
 
-def extract_context_messages(value: Any, *, max_tokens: int = 16_000) -> str:
+def extract_ordered_instruction_context(value: Any, *, max_tokens: int = 16_000) -> str:
     if not isinstance(value, list):
         return ""
     parts: list[str] = []
@@ -191,6 +191,56 @@ def extract_context_messages(value: Any, *, max_tokens: int = 16_000) -> str:
     if clipped != out:
         clipped += "\n[local proxy token-budget clipped developer/system context]"
     return clipped
+
+
+def extract_role_contexts(value: Any, *, max_tokens: int = 16_000) -> tuple[str, str, str]:
+    """Extract native system/developer context without flattening it into user chat.
+
+    Returns `(system_context, developer_context, ordered_context)`.
+    `ordered_context` preserves the relative order of native system/developer
+    messages and is what the payload builder feeds into upstream
+    `instructions`. The separated role fields are kept on `NormalizedRequest`
+    for auditability and future prompt builders.
+    """
+    if not isinstance(value, list):
+        return "", "", ""
+    system_parts: list[str] = []
+    developer_parts: list[str] = []
+    ordered_parts: list[str] = []
+    for idx, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        if role not in {"system", "developer"}:
+            continue
+        text = flatten_content(item.get("content", item.get("text", ""))).strip()
+        if not text:
+            continue
+        section = f"[{idx}] [{role}]\n{text}"
+        ordered_parts.append(section)
+        if role == "system":
+            system_parts.append(section)
+        else:
+            developer_parts.append(section)
+
+    raw_ordered = "\n\n".join(ordered_parts)
+    raw_system = "\n\n".join(system_parts)
+    raw_developer = "\n\n".join(developer_parts)
+    ordered = _clip_text_to_token_budget(raw_ordered, max_tokens, keep="head_tail")
+    system = _clip_text_to_token_budget(raw_system, max(1_000, max_tokens // 2), keep="head_tail")
+    developer = _clip_text_to_token_budget(raw_developer, max(1_000, max_tokens // 2), keep="head_tail")
+    if ordered != raw_ordered:
+        ordered += "\n[local proxy token-budget clipped ordered developer/system context]"
+    if system != raw_system:
+        system += "\n[local proxy token-budget clipped system context]"
+    if developer != raw_developer:
+        developer += "\n[local proxy token-budget clipped developer context]"
+    return system, developer, ordered
+
+
+def extract_context_messages(value: Any, *, max_tokens: int = 16_000) -> str:
+    """Backward-compatible alias for ordered native instruction context."""
+    return extract_ordered_instruction_context(value, max_tokens=max_tokens)
 
 def _short_json(value: Any, max_tokens: int = 4_000) -> str:
     try:
@@ -399,12 +449,17 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
     request_kind, is_compaction = detect_request_kind(body)
     base_instructions = flatten_content(body.get("instructions", ""))
     context_budget = _context_token_budget(body, usage_estimate.input_tokens, cfg)
-    context_messages = extract_context_messages(raw_input, max_tokens=max(4_000, context_budget // 5))
-    instructions = base_instructions
-    if context_messages:
-        instructions = (instructions + "\n\n" if instructions else "") + "Client developer/system messages from native Codex input:\n" + context_messages
+    system_context, developer_context, ordered_context = extract_role_contexts(raw_input, max_tokens=max(4_000, context_budget // 5))
+    instructions_sections: list[str] = []
+    if base_instructions:
+        instructions_sections.append("=== Top-level Responses instructions ===\n" + base_instructions)
+    if ordered_context:
+        instructions_sections.append("=== Native Codex system/developer messages (original order) ===\n" + ordered_context)
+    instructions = "\n\n".join(instructions_sections)
     instruction_tokens = estimate_text_tokens(instructions)
     transcript_budget = max(6_000, context_budget - instruction_tokens - estimate_text_tokens(latest_tool_summary) - 2_000)
+    current_budget = max(4_000, min(32_000, context_budget // 2))
+    current_user_request = _clip_text_to_token_budget(last_user_instruction(raw_input), current_budget, keep="tail")
     user_input = (
         native_input_transcript(
             raw_input,
@@ -416,17 +471,27 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
         if isinstance(raw_input, list)
         else _clip_text_to_token_budget(flatten_responses_input(raw_input), transcript_budget, keep="tail")
     )
+    if not isinstance(raw_input, list):
+        current_user_request = user_input
+    if not current_user_request:
+        current_user_request = user_input
     return NormalizedRequest(
         model=model,
         original_model=body.get("model"),
         raw_input=raw_input,
         raw_tools=body.get("tools"),
+        system_context=system_context,
+        developer_context=developer_context,
+        current_user_request=current_user_request,
+        history_summary=user_input,
+        latest_tool_batch=latest_tool_summary,
         request_kind=request_kind,
         is_compaction=is_compaction,
         estimated_input_tokens=usage_estimate.input_tokens,
         usage_estimate=usage_estimate,
         parallel_tool_calls=bool(body.get("parallel_tool_calls", not is_compaction)),
         tool_choice=body.get("tool_choice", "auto"),
+        previous_response_id=body.get("previous_response_id") if isinstance(body.get("previous_response_id"), str) else None,
         prompt_cache_key=body.get("prompt_cache_key") if isinstance(body.get("prompt_cache_key"), str) else None,
         text_config=body.get("text") if isinstance(body.get("text"), dict) else None,
         tools_summary=tools_catalog,
@@ -452,15 +517,31 @@ def normalize_chat_request(body: dict[str, Any], cfg: Settings = settings) -> No
     instructions, user_input = flatten_chat_messages(body.get("messages", []))
     tools_catalog, tool_registry = build_client_tool_catalog(body.get("tools"))
     usage_estimate = estimate_chat_usage_from_body(body)
+    current_user_request = ""
+    messages = body.get("messages", [])
+    if isinstance(messages, list):
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                current_user_request = flatten_content(msg.get("content", "")).strip()
+                if current_user_request:
+                    break
+    if not current_user_request:
+        current_user_request = user_input
     return NormalizedRequest(
         model=cfg.map_model(body.get("model")),
         original_model=body.get("model"),
         raw_input=body.get("messages", []),
         raw_tools=body.get("tools"),
+        system_context=instructions,
+        developer_context="",
+        current_user_request=current_user_request,
+        history_summary=user_input,
+        latest_tool_batch="",
         estimated_input_tokens=usage_estimate.input_tokens,
         usage_estimate=usage_estimate,
         parallel_tool_calls=bool(body.get("parallel_tool_calls", True)),
         tool_choice=body.get("tool_choice", "auto"),
+        previous_response_id=body.get("previous_response_id") if isinstance(body.get("previous_response_id"), str) else None,
         prompt_cache_key=body.get("prompt_cache_key") if isinstance(body.get("prompt_cache_key"), str) else None,
         text_config=body.get("text") if isinstance(body.get("text"), dict) else None,
         tools_summary=tools_catalog,

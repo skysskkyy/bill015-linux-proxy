@@ -20,6 +20,56 @@ from .upstream_errors import sanitize_upstream_error_detail
 from .usage_estimator import usage_estimate_dict
 
 
+def apply_tool_loop_guard(result: Bill015Result, n: NormalizedRequest) -> None:
+    """Prevent known-bad local tool loops from producing another Codex tool turn.
+
+    This does not change strict_zero or cause passthrough.  It only converts a
+    repeated local tool request into a final local answer so the client stops
+    spinning when the upstream bridge model ignored recent tool feedback.
+    """
+    if result.bridge_mode != "tool_call" or not result.tool_calls or not n.tool_history:
+        return
+
+    repeated_success = [
+        c for c in result.tool_calls
+        if is_repeated_successful_call(c.name, c.arguments, n.tool_history)
+    ]
+    if repeated_success:
+        names = ", ".join(_tool_label(c) for c in repeated_success[:5])
+        result.bridge_mode = "answer"
+        result.tool_calls = []
+        result.answer = (
+            "[local proxy loop guard] The model requested a local tool call that already succeeded "
+            f"with the same arguments ({names}). I stopped the loop; inspect the latest tool result "
+            "above and continue with a different action or final answer."
+        )
+        return
+
+    if n.latest_tool_failed and _repeats_latest_failed_tool(result.tool_calls, n.tool_history):
+        names = ", ".join(_tool_label(c) for c in result.tool_calls[:5])
+        result.bridge_mode = "answer"
+        result.tool_calls = []
+        result.answer = (
+            "[local proxy loop guard] The model repeated a tool after the latest failure "
+            f"({names}). I stopped the loop to avoid another slow no-op turn; use the failure output "
+            "above to choose a corrected command/patch or report the blocker."
+        )
+
+
+def _tool_label(call: Any) -> str:
+    ns = getattr(call, "namespace", None)
+    name = getattr(call, "name", "")
+    return f"{ns}.{name}" if ns else str(name)
+
+
+def _repeats_latest_failed_tool(calls: list[Any], history: Any) -> bool:
+    latest_failed = [out for out in getattr(history, "latest_outputs", []) if getattr(out, "success", None) is False]
+    if not latest_failed:
+        return False
+    failed_names = {str(getattr(out, "name", "")).lower() for out in latest_failed}
+    return any(str(getattr(call, "name", "")).lower() in failed_names for call in calls)
+
+
 def _args_done_deadline(cfg: Settings = settings) -> float | None:
     return time.perf_counter() + cfg.args_done_timeout_ms / 1000 if cfg.args_done_timeout_ms > 0 else None
 
@@ -89,6 +139,7 @@ def collect_bill015_result_from_events(events: Iterable[SSEEvent], n: Normalized
             result.raw_arguments = final_args
             result.args_done_seen = True
             result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry)
+            apply_tool_loop_guard(result, n)
             result.aborted = True
             break
         elif typ == "response.completed":
@@ -259,6 +310,7 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                                 result.raw_arguments = final_args
                                 result.args_done_seen = True
                                 result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry)
+                                apply_tool_loop_guard(result, n)
                                 await resp.aclose()
                                 result.aborted = True
                                 break

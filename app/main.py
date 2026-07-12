@@ -218,6 +218,7 @@ async def handle_responses_body(body: dict[str, Any]):
                 "mode": "passthrough-blocked",
                 "client_api": "responses",
                 "model": n.model,
+                "strict_zero": settings.strict_zero,
                 "reason": passthrough_reason,
                 "prompt_chars": len(n.user_input),
             })
@@ -235,6 +236,7 @@ async def handle_responses_body(body: dict[str, Any]):
             "mode": "auto-passthrough",
             "client_api": "responses",
             "model": n.model,
+            "strict_zero": settings.strict_zero,
             "reason": passthrough_reason,
             "prompt_chars": len(n.user_input),
         })
@@ -251,12 +253,13 @@ async def handle_responses_body(body: dict[str, Any]):
                 "mode": "normal-blocked",
                 "client_api": "responses",
                 "model": n.model,
+                "strict_zero": settings.strict_zero,
                 "prompt_chars": len(n.user_input),
             })
             raise HTTPException(status_code=409, detail="strict_zero blocked normal forwarding; use exploit/verify BILL-015 bridge mode.")
         runtime_state.inc_request()
         runtime_state.mark_fallback()
-        audit_logger.write({"local_request_id": local_response_id(), "mode": "normal", "client_api": "responses", "model": n.model, "prompt_chars": len(n.user_input)})
+        audit_logger.write({"local_request_id": local_response_id(), "mode": "normal", "client_api": "responses", "model": n.model, "strict_zero": settings.strict_zero, "prompt_chars": len(n.user_input)})
         if n.want_stream:
             return StreamingResponse(normal_forward_stream(body), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
         return JSONResponse(await normal_forward_json(body))
@@ -268,6 +271,51 @@ async def handle_responses_body(body: dict[str, Any]):
     return JSONResponse(response_json(result, n))
 
 
+async def handle_responses_compact_body(body: dict[str, Any]):
+    """Native `/v1/responses/compact` compatibility.
+
+    Upstream Codex's compact endpoint is unary JSON and returns
+    `{ "output": Vec<ResponseItem> }`, not a normal Response object or SSE
+    stream. Keep the BILL-015 bridge path for strict_zero/low-usage semantics,
+    but wrap the produced handoff summary in the same ResponseItem shape.
+    """
+    compact_body = _force_compaction_metadata(body)
+    compact_body["stream"] = False
+    n = normalize_responses_request(compact_body)
+    mode = active_mode()
+    if mode == "circuit-open":
+        raise HTTPException(status_code=503, detail="circuit breaker open after consecutive upstream failures")
+
+    if mode == "dry-run":
+        answer = "CONTEXT CHECKPOINT COMPACTION dry-run summary."
+        result = Bill015Result(local_request_id=local_response_id(), answer=answer, args_done_seen=False, aborted=False)
+        audit_logger.write(audit_from_result(result, n, "dry-run"))
+        runtime_state.inc_request()
+        runtime_state.mark_success(args_done=False, aborted=False)
+    elif mode == "normal" and settings.strict_zero:
+        runtime_state.inc_request()
+        runtime_state.mark_error("strict_zero blocked normal compact forwarding")
+        raise HTTPException(status_code=409, detail="strict_zero blocked normal compact forwarding; use exploit/verify BILL-015 bridge mode.")
+    else:
+        if mode == "normal":
+            mode = "exploit"
+        result = await run_and_record(n, mode)
+
+    item_id = "msg_" + result.local_request_id.removeprefix("resp_local_")[:18] + "_compact"
+    return JSONResponse(
+        {
+            "output": [
+                {
+                    "id": item_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": result.answer}],
+                }
+            ]
+        }
+    )
+
+
 @app.post("/v1/responses")
 async def responses(request: Request):
     return await handle_responses_body(await read_json_body(request))
@@ -275,11 +323,7 @@ async def responses(request: Request):
 
 @app.post("/v1/responses/compact")
 async def responses_compact(request: Request):
-    # Compatibility with relays that expose ResponsesCompact. Native Codex logs
-    # mostly send compaction to /v1/responses with request_kind=compaction, but
-    # this alias preserves the same local zero/low-usage bridge path if a client
-    # uses /compact.
-    return await handle_responses_body(_force_compaction_metadata(await read_json_body(request)))
+    return await handle_responses_compact_body(await read_json_body(request))
 
 
 @app.post("/v1/chat/completions")

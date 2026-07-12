@@ -101,16 +101,14 @@ class ResponsesEventStream:
 
     def created_events(self) -> list[bytes]:
         created = make_response_object(self.rid, self.n, "in_progress", created_at=self.ctx.created_at)
-        return [
-            self.event("response.created", response=created),
-            self.event("response.in_progress", response=created),
-        ]
+        return [self.event("response.created", response=created)]
 
     def metadata_events(self) -> list[bytes]:
-        metadata = _stream_metadata(self.n)
-        if not metadata:
-            return []
-        return [self.event("response.metadata", response_id=self.rid, metadata=metadata)]
+        # Native Codex treats response.metadata as server-owned moderation,
+        # verification, and turn-state metadata. Do not synthesize it from
+        # client metadata; preserving it in the final response object is enough
+        # and avoids showing non-native stream artifacts.
+        return []
 
     def keepalive_event(self) -> bytes:
         return self.event("keepalive")
@@ -118,20 +116,13 @@ class ResponsesEventStream:
     def message_events(self, answer: str, *, output_index: int = 0) -> list[bytes]:
         item_id = message_item_id(self.rid, output_index)
         final_part = {"type": "output_text", "text": answer, "logprobs": []}
-        initial_part = {"type": "output_text", "text": "", "logprobs": []}
         if settings.responses_emit_annotations:
             final_part["annotations"] = []
-            initial_part["annotations"] = []
-        events = [
-            self.event("response.output_item.added", output_index=output_index, item=make_message_item(item_id, "in_progress", [])),
-            self.event("response.content_part.added", item_id=item_id, output_index=output_index, content_index=0, part=initial_part),
-        ]
+        events = [self.event("response.output_item.added", output_index=output_index, item=make_message_item(item_id, "in_progress", []))]
         for chunk in split_text(answer, settings.responses_chunk_size):
             events.append(self.event("response.output_text.delta", item_id=item_id, output_index=output_index, content_index=0, delta=chunk, logprobs=[]))
         events.extend(
             [
-                self.event("response.output_text.done", item_id=item_id, output_index=output_index, content_index=0, text=answer, logprobs=[]),
-                self.event("response.content_part.done", item_id=item_id, output_index=output_index, content_index=0, part=final_part),
                 self.event("response.output_item.done", output_index=output_index, item_id=item_id, item=make_message_item(item_id, "completed", [final_part])),
             ]
         )
@@ -159,15 +150,10 @@ class ResponsesEventStream:
 
     def tool_call_events(self, call: BridgeToolCall, output_index: int) -> list[bytes]:
         item_id = tool_call_item_id(call)
-        events = [
-            self.event("response.output_item.added", output_index=output_index, item=tool_call_item(call, item_id, "in_progress"))
-        ]
+        events = [self.event("response.output_item.added", output_index=output_index, item=tool_call_item(call, item_id, "in_progress"))]
         if call.call_type == "custom":
             events.extend(self._custom_tool_input_events(call, item_id, output_index))
-        elif call.call_type in {"tool_search", "web_search"}:
-            # Built-in Responses items carry arguments on output_item.done.
-            pass
-        else:
+        elif call.call_type not in {"tool_search", "web_search"}:
             events.extend(self._function_call_argument_events(call, item_id, output_index))
         events.append(self.event("response.output_item.done", output_index=output_index, item_id=item_id, item=tool_call_item(call, item_id, "completed")))
         return events
@@ -195,8 +181,7 @@ class ResponsesEventStream:
     def _custom_tool_input_events(self, call: BridgeToolCall, item_id: str, output_index: int) -> list[bytes]:
         events = []
         for chunk in split_text(call.arguments, settings.responses_chunk_size):
-            events.append(self.event("response.custom_tool_call_input.delta", item_id=item_id, output_index=output_index, delta=chunk))
-        events.append(self.event("response.custom_tool_call_input.done", item_id=item_id, output_index=output_index, input=call.arguments))
+            events.append(self.event("response.custom_tool_call_input.delta", item_id=item_id, output_index=output_index, call_id=call.id, delta=chunk))
         return events
 
     def _function_call_argument_events(self, call: BridgeToolCall, item_id: str, output_index: int) -> list[bytes]:
@@ -206,7 +191,6 @@ class ResponsesEventStream:
             base["namespace"] = call.namespace
         for chunk in split_text(call.arguments, settings.responses_chunk_size):
             events.append(self.event("response.function_call_arguments.delta", **base, delta=chunk))
-        events.append(self.event("response.function_call_arguments.done", **base, arguments=call.arguments))
         return events
 
 
