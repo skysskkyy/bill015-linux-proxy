@@ -66,8 +66,35 @@ def _repeats_latest_failed_tool(calls: list[Any], history: Any) -> bool:
     latest_failed = [out for out in getattr(history, "latest_outputs", []) if getattr(out, "success", None) is False]
     if not latest_failed:
         return False
-    failed_names = {str(getattr(out, "name", "")).lower() for out in latest_failed}
-    return any(str(getattr(call, "name", "")).lower() in failed_names for call in calls)
+    failed_call_ids = {str(getattr(out, "call_id", "") or "") for out in latest_failed}
+    failed_keys = set()
+    for previous_call in getattr(history, "calls", []) or []:
+        if str(getattr(previous_call, "call_id", "") or "") in failed_call_ids:
+            failed_keys.add((
+                str(getattr(previous_call, "name", "") or "").lower(),
+                _normalize_tool_arguments(str(getattr(previous_call, "arguments", "") or "")),
+            ))
+    if not failed_keys:
+        return False
+    for call in calls:
+        key = (
+            str(getattr(call, "name", "") or "").lower(),
+            _normalize_tool_arguments(str(getattr(call, "arguments", "") or "")),
+        )
+        if key in failed_keys:
+            return True
+    return False
+
+
+def _normalize_tool_arguments(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        obj = json.loads(text)
+        return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return " ".join(text.split())
 
 
 def _args_done_deadline(cfg: Settings = settings) -> float | None:

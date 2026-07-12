@@ -270,6 +270,58 @@ def test_loop_guard_stops_repeated_successful_tool_call():
     assert "loop guard" in result.answer
 
 
+def test_loop_guard_allows_corrected_retry_after_failed_tool_name():
+    from app.models import BridgeToolCall, Bill015Result
+    from app.normalization import normalize_responses_request
+    from app.upstream import apply_tool_loop_guard
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "function_call", "name": "js", "namespace": "mcp__node_repl", "call_id": "call_bad", "arguments": "{\"code\":\"bad()\"}"},
+                {"type": "function_call_output", "call_id": "call_bad", "output": "Error: bad is not defined"},
+            ],
+        }
+    )
+    result = Bill015Result(
+        local_request_id="resp_local_retry",
+        bridge_mode="tool_call",
+        tool_calls=[BridgeToolCall(id="call_good", name="js", namespace="mcp__node_repl", arguments="{\"code\":\"fixed()\"}")],
+    )
+
+    apply_tool_loop_guard(result, n)
+
+    assert result.bridge_mode == "tool_call"
+    assert result.tool_calls
+
+
+def test_loop_guard_stops_exact_failed_tool_replay():
+    from app.models import BridgeToolCall, Bill015Result
+    from app.normalization import normalize_responses_request
+    from app.upstream import apply_tool_loop_guard
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "function_call", "name": "js", "namespace": "mcp__node_repl", "call_id": "call_bad", "arguments": "{\"code\":\"bad()\"}"},
+                {"type": "function_call_output", "call_id": "call_bad", "output": "Error: bad is not defined"},
+            ],
+        }
+    )
+    result = Bill015Result(
+        local_request_id="resp_local_retry",
+        bridge_mode="tool_call",
+        tool_calls=[BridgeToolCall(id="call_bad_again", name="js", namespace="mcp__node_repl", arguments="{\"code\":\"bad()\"}")],
+    )
+
+    apply_tool_loop_guard(result, n)
+
+    assert result.bridge_mode == "answer"
+    assert result.tool_calls == []
+
+
 def test_tool_search_auto_expansion_is_disabled_by_default():
     from app.tool_bridge import parse_function_arguments
 
@@ -597,6 +649,44 @@ def test_response_failed_event_sanitizes_http_exception_detail():
     assert "<!DOCTYPE" not in text
     assert "<html" not in text.lower()
     assert "packyapi.com | 520" in text
+
+
+def test_response_stream_uses_in_progress_heartbeat():
+    from app.models import Bill015Result, NormalizedRequest
+    from app.response_events import responses_sse_generator
+    from app.sse import parse_sse_lines
+
+    async def slow_result():
+        await asyncio.sleep(0.02)
+        return Bill015Result(local_request_id="resp_local_slow", answer="OK", args_done_seen=True)
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="hello", want_stream=True, client_api="responses", is_primary_path=True)
+
+    async def run():
+        chunks = []
+        async for chunk in responses_sse_generator(slow_result(), n, "resp_local_slow"):
+            chunks.append(chunk.decode("utf-8"))
+        return "".join(chunks)
+
+    text = asyncio.run(run())
+    events = [ev.json for ev in parse_sse_lines(text.splitlines(True)) if ev.json]
+    types = [event["type"] for event in events]
+
+    assert types[:2] == ["response.created", "response.in_progress"]
+    assert ": keep-alive" not in text
+
+
+def test_http_timeout_read_is_not_shorter_than_args_done(monkeypatch):
+    from app.config import settings
+    from app.upstream_client import http_timeout
+
+    monkeypatch.setattr(settings, "upstream_timeout_seconds", 300.0)
+    monkeypatch.setattr(settings, "args_done_timeout_ms", 300000)
+    monkeypatch.setattr(settings, "upstream_idle_timeout_ms", 180000)
+
+    timeout = http_timeout(settings)
+
+    assert timeout.read == 300.0
 
 
 def test_normal_forward_stream_non_200_emits_response_failed_done(monkeypatch):

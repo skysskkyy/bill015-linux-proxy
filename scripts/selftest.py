@@ -297,7 +297,7 @@ def main() -> None:
 
     message_events = list(parse_sse_lines(asyncio.run(collect_message_stream()).splitlines(True)))
     message_types = [ev.json["type"] for ev in message_events if ev.json]
-    assert_true(message_types[:2] == ["response.created", "response.output_item.added"], "message lifecycle prefix wrong")
+    assert_true(message_types[:2] == ["response.created", "response.in_progress"], "message lifecycle prefix wrong")
     assert_true("response.output_text.delta" in message_types and "response.output_item.done" in message_types and message_types[-1] == "response.completed", "message lifecycle missing events")
     assert_true(message_events[-1].data == "[DONE]", "message stream missing DONE")
     print("[ok] native Responses message lifecycle")
@@ -346,7 +346,7 @@ def main() -> None:
         return "".join(chunks)
 
     heartbeat_text = asyncio.run(collect_heartbeat_stream())
-    assert_true(": keep-alive" in heartbeat_text and "response.completed" in heartbeat_text, "heartbeat stream missing keep-alive or completion")
+    assert_true("response.in_progress" in heartbeat_text and "response.completed" in heartbeat_text, "heartbeat stream missing in_progress or completion")
     print("[ok] streaming keep-alive heartbeat")
 
     events = list(parse_sse_lines([

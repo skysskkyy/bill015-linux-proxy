@@ -101,7 +101,10 @@ class ResponsesEventStream:
 
     def created_events(self) -> list[bytes]:
         created = make_response_object(self.rid, self.n, "in_progress", created_at=self.ctx.created_at)
-        return [self.event("response.created", response=created)]
+        return [
+            self.event("response.created", response=created),
+            self.event("response.in_progress", response=created),
+        ]
 
     def metadata_events(self) -> list[bytes]:
         # Native Codex treats response.metadata as server-owned moderation,
@@ -111,7 +114,7 @@ class ResponsesEventStream:
         return []
 
     def keepalive_event(self) -> bytes:
-        return self.event("keepalive")
+        return self.event("response.in_progress", response=make_response_object(self.rid, self.n, "in_progress", created_at=self.ctx.created_at))
 
     def message_events(self, answer: str, *, output_index: int = 0) -> list[bytes]:
         item_id = message_item_id(self.rid, output_index)
@@ -213,12 +216,9 @@ async def responses_sse_generator(result_coro, n: NormalizedRequest, rid: str | 
             # Keep the Codex client and any intermediate proxy from declaring
             # the stream dead while the upstream model is still reasoning or
             # while the local bridge is waiting for emit_value arguments.
-            # SSE comments are valid protocol frames and are ignored by the
-            # Responses event parser.
-            if settings.responses_typed_keepalive:
-                yield stream.keepalive_event()
-            else:
-                yield b": keep-alive\n\n"
+            # Codex Desktop's idle detector expects parsed SSE events; comments
+            # can still leave the UI reconnecting during long gpt-5.6-sol gaps.
+            yield stream.keepalive_event()
         result: Bill015Result = task.result()
         result.local_request_id = rid
         if result.bridge_mode == "tool_call" and result.tool_calls:

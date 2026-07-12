@@ -17,7 +17,9 @@ def http_timeout(cfg: Settings = settings) -> httpx.Timeout | None:
     """Build the effective upstream timeout from config."""
     total = cfg.upstream_timeout_seconds if cfg.upstream_timeout_seconds > 0 else None
     args_done = cfg.args_done_timeout_ms / 1000 if cfg.args_done_timeout_ms > 0 else None
-    read = cfg.upstream_idle_timeout_ms / 1000 if cfg.upstream_idle_timeout_ms > 0 else (total or args_done)
+    configured_read = cfg.upstream_idle_timeout_ms / 1000 if cfg.upstream_idle_timeout_ms > 0 else None
+    read_candidates = [value for value in (configured_read, args_done, total) if value is not None]
+    read = max(read_candidates) if read_candidates else None
     connect = total if total is not None else 10.0
     if total is None and read is None:
         return None
