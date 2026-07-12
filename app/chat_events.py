@@ -16,12 +16,14 @@ async def chat_sse_generator(result_coro, n: NormalizedRequest) -> AsyncIterator
         result: Bill015Result = await result_coro
         finish_reason = "tool_calls" if result.bridge_mode == "tool_call" and result.tool_calls else "stop"
         initial_delta: dict[str, Any] = {"role": "assistant"}
-        if finish_reason == "tool_calls":
+        if finish_reason == "tool_calls" and not result.answer:
             initial_delta["tool_calls"] = [_chat_tool_call_delta(call, index) for index, call in enumerate(result.tool_calls)]
         yield encode_sse({"id": result.local_request_id, "object": "chat.completion.chunk", "model": n.model, "choices": [{"index": 0, "delta": initial_delta}]})
-        if finish_reason != "tool_calls":
+        if result.answer:
             for chunk in split_text(result.answer, 512):
                 yield encode_sse({"id": result.local_request_id, "object": "chat.completion.chunk", "model": n.model, "choices": [{"index": 0, "delta": {"content": chunk}}]})
+        if finish_reason == "tool_calls" and result.answer:
+            yield encode_sse({"id": result.local_request_id, "object": "chat.completion.chunk", "model": n.model, "choices": [{"index": 0, "delta": {"tool_calls": [_chat_tool_call_delta(call, index) for index, call in enumerate(result.tool_calls)]}}]})
         yield encode_sse({"id": result.local_request_id, "object": "chat.completion.chunk", "model": n.model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}], "usage": build_chat_usage(n, answer=result.answer)})
         yield b"data: [DONE]\n\n"
     except HTTPException as e:
@@ -36,7 +38,7 @@ def chat_json(result: Bill015Result, n: NormalizedRequest) -> dict[str, Any]:
     finish_reason = "tool_calls" if result.bridge_mode == "tool_call" and result.tool_calls else "stop"
     message: dict[str, Any] = {"role": "assistant", "content": result.answer}
     if finish_reason == "tool_calls":
-        message["content"] = None
+        message["content"] = result.answer or None
         message["tool_calls"] = [_chat_tool_call(call, index) for index, call in enumerate(result.tool_calls)]
     return {
         "id": "chatcmpl-local-" + result.local_request_id.removeprefix("resp_local_"),

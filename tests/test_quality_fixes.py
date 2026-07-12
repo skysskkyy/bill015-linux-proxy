@@ -698,6 +698,44 @@ def test_response_stream_uses_in_progress_heartbeat():
     assert ": keep-alive" not in text
 
 
+def test_tool_call_stream_can_include_commentary_message_before_tools():
+    from app.models import Bill015Result, BridgeToolCall, NormalizedRequest
+    from app.response_events import response_json, responses_sse_generator
+    from app.sse import parse_sse_lines
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="inspect", want_stream=True, client_api="responses", is_primary_path=True)
+    result = Bill015Result(
+        local_request_id="resp_local_mixed",
+        bridge_mode="tool_call",
+        answer="我先检查目录结构。",
+        tool_calls=[BridgeToolCall(id="call_mixed", name="shell_command", arguments='{"command":"Get-ChildItem"}')],
+        args_done_seen=True,
+    )
+
+    async def run():
+        chunks = []
+        async for chunk in responses_sse_generator(asyncio.sleep(0, result), n, "resp_local_mixed"):
+            chunks.append(chunk.decode("utf-8"))
+        return "".join(chunks)
+
+    text = asyncio.run(run())
+    objs = [ev.json for ev in parse_sse_lines(text.splitlines(True)) if ev.json]
+    added = [obj for obj in objs if obj["type"] == "response.output_item.added"]
+    done = [obj for obj in objs if obj["type"] == "response.output_item.done"]
+    completed = [obj for obj in objs if obj["type"] == "response.completed"][-1]["response"]
+
+    assert [(obj["output_index"], obj["item"]["type"]) for obj in added] == [(0, "message"), (1, "function_call")]
+    assert done[0]["item"]["type"] == "message"
+    assert done[0]["item"]["phase"] == "commentary"
+    assert done[1]["item"]["type"] == "function_call"
+    assert [item["type"] for item in completed["output"]] == ["message", "function_call"]
+    assert completed["output"][0]["phase"] == "commentary"
+    assert completed["output"][0]["content"][0]["text"] == "我先检查目录结构。"
+
+    body = response_json(result, n)
+    assert [item["type"] for item in body["output"]] == ["message", "function_call"]
+
+
 def test_http_timeout_read_is_not_shorter_than_args_done(monkeypatch):
     from app.config import settings
     from app.upstream_client import http_timeout

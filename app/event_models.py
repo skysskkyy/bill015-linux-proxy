@@ -162,14 +162,23 @@ def make_message_part(part: MessagePart | dict[str, Any] | str) -> dict[str, Any
     return {"type": part.type, "text": part.text, "annotations": part.annotations}
 
 
-def make_message_item(item_id: str, status: str, parts: list[MessagePart | dict[str, Any] | str] | None = None) -> dict[str, Any]:
-    return {
+def make_message_item(
+    item_id: str,
+    status: str,
+    parts: list[MessagePart | dict[str, Any] | str] | None = None,
+    *,
+    phase: str | None = None,
+) -> dict[str, Any]:
+    item = {
         "id": item_id,
         "type": "message",
         "status": status,
         "role": "assistant",
         "content": [make_message_part(part) for part in (parts or [])],
     }
+    if phase:
+        item["phase"] = phase
+    return item
 
 
 def _arguments_object(raw: str, default: dict[str, Any] | None = None) -> dict[str, Any]:

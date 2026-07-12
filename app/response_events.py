@@ -32,7 +32,7 @@ TRUNCATION_MARKERS = (
 def response_json(result: Bill015Result, n: NormalizedRequest) -> dict[str, Any]:
     status, incomplete_details = _status_for_answer(result.answer)
     if result.bridge_mode == "tool_call" and result.tool_calls:
-        return response_object_with_tool_calls(result.local_request_id, n, result.tool_calls, "completed")
+        return response_object_with_tool_calls(result.local_request_id, n, result.tool_calls, "completed", answer=result.answer)
     return response_object(result.local_request_id, n, status, result.answer, incomplete_details=incomplete_details)
 
 
@@ -74,9 +74,14 @@ def response_object_with_tool_calls(
     n: NormalizedRequest,
     calls: list[BridgeToolCall],
     status: str = "completed",
+    *,
+    answer: str = "",
 ) -> dict[str, Any]:
-    output = [tool_call_item(call, tool_call_item_id(call), status) for call in calls]
-    return make_response_object(rid, n, status, output=output, calls=calls)
+    output: list[dict[str, Any]] = []
+    if answer.strip():
+        output.append(make_message_item(message_item_id(rid, 0), "completed", [_message_part(answer)], phase="commentary"))
+    output.extend(tool_call_item(call, tool_call_item_id(call), status) for call in calls)
+    return make_response_object(rid, n, status, output=output, answer=answer, calls=calls)
 
 
 def _message_part(answer: str) -> dict[str, Any]:
@@ -116,17 +121,17 @@ class ResponsesEventStream:
     def keepalive_event(self) -> bytes:
         return self.event("response.in_progress", response=make_response_object(self.rid, self.n, "in_progress", created_at=self.ctx.created_at))
 
-    def message_events(self, answer: str, *, output_index: int = 0) -> list[bytes]:
+    def message_events(self, answer: str, *, output_index: int = 0, phase: str | None = None) -> list[bytes]:
         item_id = message_item_id(self.rid, output_index)
         final_part = {"type": "output_text", "text": answer, "logprobs": []}
         if settings.responses_emit_annotations:
             final_part["annotations"] = []
-        events = [self.event("response.output_item.added", output_index=output_index, item=make_message_item(item_id, "in_progress", []))]
+        events = [self.event("response.output_item.added", output_index=output_index, item=make_message_item(item_id, "in_progress", [], phase=phase))]
         for chunk in split_text(answer, settings.responses_chunk_size):
             events.append(self.event("response.output_text.delta", item_id=item_id, output_index=output_index, content_index=0, delta=chunk, logprobs=[]))
         events.extend(
             [
-                self.event("response.output_item.done", output_index=output_index, item_id=item_id, item=make_message_item(item_id, "completed", [final_part])),
+                self.event("response.output_item.done", output_index=output_index, item_id=item_id, item=make_message_item(item_id, "completed", [final_part], phase=phase)),
             ]
         )
         return events
@@ -161,8 +166,8 @@ class ResponsesEventStream:
         events.append(self.event("response.output_item.done", output_index=output_index, item_id=item_id, item=tool_call_item(call, item_id, "completed")))
         return events
 
-    def completed_tool_response(self, calls: list[BridgeToolCall]) -> bytes:
-        return self.event("response.completed", response=response_object_with_tool_calls(self.rid, self.n, calls, "completed"))
+    def completed_tool_response(self, calls: list[BridgeToolCall], *, answer: str = "") -> bytes:
+        return self.event("response.completed", response=response_object_with_tool_calls(self.rid, self.n, calls, "completed", answer=answer))
 
     def completed_message_response(self, answer: str) -> bytes:
         status, incomplete_details = _status_for_answer(answer)
@@ -222,10 +227,15 @@ async def responses_sse_generator(result_coro, n: NormalizedRequest, rid: str | 
         result: Bill015Result = task.result()
         result.local_request_id = rid
         if result.bridge_mode == "tool_call" and result.tool_calls:
-            for output_index, call in enumerate(result.tool_calls):
+            tool_start_index = 0
+            if result.answer.strip():
+                for chunk in stream.message_events(result.answer, output_index=0, phase="commentary"):
+                    yield chunk
+                tool_start_index = 1
+            for output_index, call in enumerate(result.tool_calls, start=tool_start_index):
                 for chunk in stream.tool_call_events(call, output_index):
                     yield chunk
-            yield stream.completed_tool_response(result.tool_calls)
+            yield stream.completed_tool_response(result.tool_calls, answer=result.answer)
             yield b"data: [DONE]\n\n"
             return
 

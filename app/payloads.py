@@ -202,7 +202,7 @@ def build_emit_value_schema(
                 },
                 cfg.answer_field: {
                     "type": "string",
-                    "description": "Final assistant answer when mode=answer."
+                    "description": "Final assistant answer when mode=answer. Optional brief progress/commentary text when mode=tool_call; leave empty only if no useful user-visible update."
                 },
                 "tool_calls": tool_calls_schema,
             },
@@ -282,7 +282,8 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         + cfg.function_name
         + " exactly once; never emit normal assistant text outside that function call. "
         "Direct final answer: mode='answer', answer=<final text>, tool_calls=[]. "
-        "Need local action: mode='tool_call', answer='', tool_calls=[...]. "
+        "Need local action: mode='tool_call', answer=<optional brief progress/commentary text>, tool_calls=[...]. "
+        "When native Codex would say a short preamble before commands (for example what it is checking or changing), put that preamble in answer; leave answer empty only for purely mechanical/obvious follow-up calls. "
         "Function tool: name=exact catalog name, arguments=JSON string matching that tool's parameter schema. "
         "Namespace/MCP tool: namespace='mcp__...' or 'codex_app', name=subtool. "
         "Custom/FREEFORM tool such as apply_patch: type='custom', input=raw payload, arguments='{}'. "
@@ -292,8 +293,8 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         "Parallel independent tool calls are allowed. After tool results appear in a later turn, inspect them first, then answer or request the next tool call."
         "\n\nExamples for the function arguments you must produce:"
         "\n- Final: {\"mode\":\"answer\",\"answer\":\"OK\",\"tool_calls\":[]}"
-        "\n- Shell: {\"mode\":\"tool_call\",\"answer\":\"\",\"tool_calls\":[{\"type\":\"function\",\"namespace\":\"\",\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"Get-ChildItem\\\"}\",\"input\":\"\"}]}"
-        "\n- Patch: {\"mode\":\"tool_call\",\"answer\":\"\",\"tool_calls\":[{\"type\":\"custom\",\"namespace\":\"\",\"name\":\"apply_patch\",\"arguments\":\"{}\",\"input\":\"*** Begin Patch\\n...\\n*** End Patch\"}]}"
+        "\n- Shell: {\"mode\":\"tool_call\",\"answer\":\"I’ll inspect the project structure first.\",\"tool_calls\":[{\"type\":\"function\",\"namespace\":\"\",\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"Get-ChildItem\\\"}\",\"input\":\"\"}]}"
+        "\n- Patch: {\"mode\":\"tool_call\",\"answer\":\"I found the narrow fix and will patch it now.\",\"tool_calls\":[{\"type\":\"custom\",\"namespace\":\"\",\"name\":\"apply_patch\",\"arguments\":\"{}\",\"input\":\"*** Begin Patch\\n...\\n*** End Patch\"}]}"
     )
     client_context = _client_instruction_context(n)
     if client_context:

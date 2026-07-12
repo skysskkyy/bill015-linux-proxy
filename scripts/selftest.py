@@ -287,6 +287,28 @@ def main() -> None:
     assert_true({"error", "incomplete_details", "reasoning", "text", "metadata"}.issubset(completed.keys()), "completed response native fields missing")
     print("[ok] native Responses tool-call stream synthesis")
 
+    async def collect_mixed_tool_stream() -> str:
+        nr = normalize_responses_request({"model": "gpt-5.5", "input": "inspect", "stream": True, "tools": tools})
+        result = Bill015Result(
+            local_request_id="resp_local_mixedtest",
+            bridge_mode="tool_call",
+            answer="I’ll inspect the project structure first.",
+            tool_calls=[BridgeToolCall(id="call_mixedtest", name="shell_command", arguments="{\"command\":\"Get-ChildItem\"}", call_type="function")],
+            args_done_seen=True,
+        )
+        chunks = []
+        async for chunk in responses_sse_generator(asyncio.sleep(0, result), nr, "resp_local_mixedtest"):
+            chunks.append(chunk.decode("utf-8"))
+        return "".join(chunks)
+
+    mixed_text = asyncio.run(collect_mixed_tool_stream())
+    mixed_objs = [ev.json for ev in parse_sse_lines(mixed_text.splitlines(True)) if ev.json]
+    mixed_added = [(obj["output_index"], obj["item"]["type"]) for obj in mixed_objs if obj["type"] == "response.output_item.added"]
+    mixed_completed = [obj for obj in mixed_objs if obj["type"] == "response.completed"][-1]["response"]
+    assert_true(mixed_added == [(0, "message"), (1, "function_call")], "mixed commentary/tool output_index sequence wrong")
+    assert_true([item["type"] for item in mixed_completed["output"]] == ["message", "function_call"] and mixed_completed["output"][0].get("phase") == "commentary", "mixed commentary/tool completed output wrong")
+    print("[ok] native commentary-before-tool stream synthesis")
+
     async def collect_message_stream() -> str:
         nr = normalize_responses_request({"model": "gpt-5.5", "input": "answer", "stream": True})
         result = Bill015Result(local_request_id="resp_local_msgtest", answer="hello world", args_done_seen=True)
