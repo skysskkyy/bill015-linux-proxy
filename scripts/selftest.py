@@ -185,6 +185,18 @@ def main() -> None:
         tool_registry={"shell_command": {"call_type": "function", "output_name": "shell_command", "raw_type": "function"}},
     )
     assert_true(t_mode == "tool_call" and len(t_calls) == 1 and t_calls[0].name == "shell_command", "tool_call parser failed")
+    fallback_answer, _, _, fallback_mode, fallback_calls = parse_function_arguments(
+        '{"mode":"tool_call","answer":"need chrome","tool_calls":[{"tool_name":"Chrome Integration","parameters":{"action":"extract Level 0 settings text"},"input":""}]}',
+        tool_registry={"tool_search": {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}},
+    )
+    assert_true(
+        fallback_mode == "tool_call"
+        and fallback_answer == "need chrome"
+        and len(fallback_calls) == 1
+        and fallback_calls[0].call_type == "tool_search"
+        and "Chrome Integration" in fallback_calls[0].arguments,
+        "invalid/display tool call did not fall back to tool_search",
+    )
     print("[ok] function argument parser")
 
     tools = [

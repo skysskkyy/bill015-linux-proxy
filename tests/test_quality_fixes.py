@@ -148,9 +148,10 @@ def test_strict_unknown_tool_schema_allows_only_tool_search_discovery_without_re
         '{"mode":"tool_call","answer":"","tool_calls":[{"type":"function","namespace":"","name":"not_registered","arguments":{},"input":""}]}',
         tool_registry={},
     )
-    assert mode == "answer"
-    assert calls == []
-    assert "no valid tool_calls" in answer
+    assert mode == "tool_call"
+    assert answer
+    assert calls[0].call_type == "tool_search"
+    assert "not_registered" in calls[0].arguments
 
     _, _, _, search_mode, search_calls = parse_function_arguments(
         json.dumps({
@@ -170,6 +171,64 @@ def test_strict_unknown_tool_schema_allows_only_tool_search_discovery_without_re
     )
     assert search_mode == "tool_call"
     assert search_calls[0].call_type == "tool_search"
+
+
+def test_invalid_or_display_named_tool_calls_fall_back_to_discovery_not_user_error():
+    from app.tool_bridge import parse_function_arguments
+
+    answer, _, _, mode, calls = parse_function_arguments(
+        json.dumps(
+            {
+                "mode": "tool_call",
+                "answer": "我需要读取当前 Chrome 页面。",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "tool_name": "Chrome Integration",
+                        "parameters": {"action": "extract Level 0 settings text"},
+                        "input": "",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        tool_registry={"tool_search": {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}},
+    )
+
+    assert mode == "tool_call"
+    assert answer == "我需要读取当前 Chrome 页面。"
+    assert len(calls) == 1
+    assert calls[0].call_type == "tool_search"
+    assert "Chrome Integration" in calls[0].arguments
+    assert "Level 0" in calls[0].arguments
+
+
+def test_nested_native_call_shape_is_recovered():
+    from app.tool_bridge import parse_function_arguments
+
+    registry = {
+        "mcp__chrome.extract_text": {
+            "call_type": "function",
+            "output_name": "extract_text",
+            "namespace": "mcp__chrome",
+            "raw_type": "function",
+        }
+    }
+    _, _, _, mode, calls = parse_function_arguments(
+        json.dumps(
+            {
+                "mode": "tool_call",
+                "answer": "",
+                "tool_calls": [{"native_call": {"namespace": "mcp__chrome", "name": "extract_text"}, "parameters": {"level": 0}}],
+            }
+        ),
+        tool_registry=registry,
+    )
+
+    assert mode == "tool_call"
+    assert calls[0].namespace == "mcp__chrome"
+    assert calls[0].name == "extract_text"
+    assert calls[0].arguments == '{"level": 0}'
 
 
 def test_emit_value_schema_is_upstream_compatible_and_tools_are_validated_locally():

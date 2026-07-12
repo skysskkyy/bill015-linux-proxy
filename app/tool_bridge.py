@@ -382,8 +382,8 @@ def resolve_bridge_tool_call(
     tool_registry: dict[str, dict[str, Any]] | None = None,
     cfg: Settings = settings,
 ) -> BridgeToolCall | None:
-    raw_name = str(call.get("name") or "").strip()
-    raw_namespace = str(call.get("namespace") or "").strip()
+    raw_name = _call_name(call)
+    raw_namespace = _call_namespace(call)
     if not raw_name:
         return None
 
@@ -446,7 +446,81 @@ def _resolve_tool_spec(raw_name: str, raw_namespace: str, registry: dict[str, di
         spec = registry.get(candidate.lower())
         if spec:
             return spec
+    fuzzy = _resolve_tool_spec_fuzzy(raw_name, raw_namespace, registry)
+    if fuzzy:
+        return fuzzy
     return {}
+
+
+def _call_name(call: dict[str, Any]) -> str:
+    """Accept common non-native tool-call spellings from less reliable models.
+
+    gpt-5.6-sol sometimes follows the semantic contract but emits a display-ish
+    key such as ``tool_name``/``function_name`` or nests the native call under
+    ``tool``/``native_call``.  Native Codex itself is tolerant at the item layer;
+    the bridge should not turn those recoverable shapes into a user-visible
+    "[local proxy] ... no valid tool_calls" answer.
+    """
+    for key in ("name", "tool_name", "function_name", "tool", "function"):
+        value = call.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            nested = value.get("name") or value.get("tool_name") or value.get("function_name")
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+    native_call = call.get("native_call")
+    if isinstance(native_call, dict):
+        nested = native_call.get("name")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+    requested_type = str(call.get("type") or call.get("call_type") or "").lower()
+    if requested_type in {"tool_search", "web_search"}:
+        return requested_type
+    return ""
+
+
+def _call_namespace(call: dict[str, Any]) -> str:
+    for key in ("namespace", "tool_namespace"):
+        value = call.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("tool", "function", "native_call"):
+        value = call.get(key)
+        if isinstance(value, dict):
+            nested = value.get("namespace")
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+    return ""
+
+
+def _resolve_tool_spec_fuzzy(raw_name: str, raw_namespace: str, registry: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    needle = _tool_name_key(raw_name)
+    if not needle:
+        return {}
+    ns_key = _tool_name_key(raw_namespace)
+    matches: list[dict[str, Any]] = []
+    for alias, spec in registry.items():
+        candidates = {
+            alias,
+            str(spec.get("output_name") or ""),
+            str(spec.get("namespace") or ""),
+        }
+        if spec.get("namespace") and spec.get("output_name"):
+            candidates.add(f"{spec.get('namespace')}.{spec.get('output_name')}")
+            candidates.add(f"{spec.get('namespace')} {spec.get('output_name')}")
+        normalized = {_tool_name_key(c) for c in candidates if c}
+        if needle in normalized or any(needle and (needle in c or c in needle) for c in normalized):
+            if ns_key and ns_key not in {_tool_name_key(str(spec.get("namespace") or "")), _tool_name_key(alias)}:
+                continue
+            matches.append(spec)
+    if len(matches) == 1:
+        return matches[0]
+    return {}
+
+
+def _tool_name_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
 def _split_namespace_name(raw_name: str, raw_namespace: str = "") -> tuple[str | None, str | None]:
@@ -584,14 +658,22 @@ def parse_function_arguments(
     tool_calls: list[BridgeToolCall] = []
 
     if mode == "tool_call":
-        for call in _iter_call_objects(obj.get("tool_calls")):
+        raw_calls = _iter_call_objects(obj.get("tool_calls"))
+        for call in raw_calls:
             resolved = resolve_bridge_tool_call(call, tool_registry)
             if resolved:
                 tool_calls.append(resolved)
         tool_calls = expand_deferred_tool_searches(tool_calls, tool_registry, cfg)
         if not tool_calls:
-            mode = "answer"
-            answer = "[local proxy] tool_call mode requested but no valid tool_calls were provided."
+            fallback = _fallback_tool_search_for_invalid_calls(raw_calls, answer)
+            resolved = resolve_bridge_tool_call(fallback, tool_registry)
+            if resolved:
+                tool_calls = [resolved]
+                if not answer:
+                    answer = "I need to resolve the right local tool first."
+            else:
+                mode = "answer"
+                answer = answer or "I need to resolve the right local tool first, but no valid local tool call was produced."
 
     if not isinstance(answer, str):
         answer = json.dumps(answer, ensure_ascii=False)
@@ -618,6 +700,71 @@ def _load_arguments_object(raw: str) -> tuple[dict[str, Any], bool, bool]:
 
 
 def _iter_call_objects(calls: Any) -> list[dict[str, Any]]:
+    if isinstance(calls, dict):
+        calls = [calls]
     if not isinstance(calls, list):
         return []
-    return [call for call in calls[:8] if isinstance(call, dict)]
+    out: list[dict[str, Any]] = []
+    for call in calls[:8]:
+        if not isinstance(call, dict):
+            continue
+        out.append(_normalize_call_object(call))
+    return out
+
+
+def _normalize_call_object(call: dict[str, Any]) -> dict[str, Any]:
+    out = dict(call)
+    # Some models put the actual function arguments under parameters/input_json
+    # even though the bridge schema asks for `arguments`.
+    if out.get("arguments") in (None, ""):
+        for key in ("parameters", "args", "input_json"):
+            if key in out:
+                out["arguments"] = out.get(key)
+                break
+    # Some models nest the whole call under a `tool`/`function` object.
+    for key in ("tool", "function", "native_call"):
+        nested = out.get(key)
+        if not isinstance(nested, dict):
+            continue
+        out.setdefault("namespace", nested.get("namespace"))
+        out.setdefault("name", nested.get("name") or nested.get("tool_name") or nested.get("function_name"))
+        if out.get("arguments") in (None, ""):
+            out["arguments"] = nested.get("arguments") or nested.get("parameters") or nested.get("args")
+    return out
+
+
+def _fallback_tool_search_for_invalid_calls(raw_calls: list[dict[str, Any]], answer: Any) -> dict[str, Any]:
+    labels: list[str] = []
+    for call in raw_calls:
+        name = _call_name(call)
+        namespace = _call_namespace(call)
+        requested_type = str(call.get("type") or call.get("call_type") or "").strip()
+        bits = [bit for bit in (namespace, name, requested_type) if bit]
+        arg_preview = _argument_preview(call.get("arguments") if call.get("arguments") is not None else call.get("input"))
+        if arg_preview:
+            bits.append(arg_preview)
+        if bits:
+            labels.append(" ".join(bits))
+    if not labels and isinstance(answer, str) and answer.strip():
+        labels.append(answer.strip()[:500])
+    query = "Resolve the correct local Codex tool for this requested action: "
+    query += "; ".join(labels[:4]) if labels else "browser chrome local tools terminal file editing"
+    query += " chrome browser current tab DOM page text extract settings local integration"
+    return {
+        "type": "tool_search",
+        "namespace": "",
+        "name": "tool_search",
+        "arguments": json.dumps({"query": query, "limit": 8}, ensure_ascii=False, separators=(",", ":")),
+        "input": "",
+    }
+
+
+def _argument_preview(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        return value[:500]
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))[:500]
+    except Exception:
+        return str(value)[:500]
