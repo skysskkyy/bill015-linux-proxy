@@ -105,6 +105,8 @@ def _normalize_native_history_items(items: list[dict[str, Any]]) -> list[dict[st
     for item in normalized:
         typ = str(item.get("type") or "message")
         call_id = str(item.get("call_id") or "")
+        if typ == "message" and _is_local_proxy_noise_message(item):
+            continue
         if typ == "function_call_output" and call_id and call_id not in call_ids["function_call"]:
             continue
         if typ == "custom_tool_call_output" and call_id and call_id not in call_ids["custom_tool_call"]:
@@ -121,6 +123,38 @@ def _normalize_native_history_items(items: list[dict[str, Any]]) -> list[dict[st
         elif typ == "tool_search_call" and call_id and call_id not in output_ids["tool_search_call"]:
             out.append({"type": "tool_search_output", "call_id": call_id, "status": "completed", "execution": "client", "tools": []})
     return out
+
+
+def _is_local_proxy_noise_message(item: dict[str, Any]) -> bool:
+    role = str(item.get("role") or "")
+    if role != "assistant":
+        return False
+    text = flatten_message_text(item.get("content", ""))
+    noise = (
+        "I need to resolve the right local tool first.",
+        "[local proxy] tool_call mode requested but no valid tool_calls were provided.",
+        "[local proxy loop guard]",
+    )
+    return any(marker in text for marker in noise)
+
+
+def flatten_message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                value = part.get("text") or part.get("output_text") or part.get("content")
+                if isinstance(value, str):
+                    parts.append(value)
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        value = content.get("text") or content.get("output_text") or content.get("content")
+        return value if isinstance(value, str) else ""
+    return ""
 
 
 def _call_ids(items: list[dict[str, Any]], types: set[str]) -> set[str]:

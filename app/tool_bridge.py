@@ -172,13 +172,12 @@ def build_typed_tool_call_schema(
         Invalid schema ... ('properties', 'tool_calls', 'items'), 'oneOf' is not permitted
 
     Tool calls therefore became impossible whenever the native Codex registry
-    was non-empty.  Keep the function schema deliberately simple and put the
-    exact tool catalogue in the high-priority prompt instead; the local parser
-    still validates every requested name against ``tool_registry`` before
-    emitting native Codex tool-call events.
+    was non-empty.  Keep the schema one-level and upstream-compatible, but still
+    mirror Codex's structured-tool idea by constraining scalar fields with
+    enums when a registry is available.  This is weaker than a per-tool oneOf,
+    but much better than asking the model to infer names from prose.
     """
-    _ = (tool_registry, allow_generic_fallback, max_tools)
-    return _generic_tool_call_schema()
+    return _generic_tool_call_schema(tool_registry or {}, allow_generic_fallback=allow_generic_fallback, max_tools=max_tools)
 
 
 def _typed_tool_call_variants(registry: dict[str, dict[str, Any]], *, max_tools: int) -> list[dict[str, Any]]:
@@ -258,13 +257,42 @@ def _empty_object_schema() -> dict[str, Any]:
     return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
 
 
-def _generic_tool_call_schema() -> dict[str, Any]:
+def _generic_tool_call_schema(
+    tool_registry: dict[str, dict[str, Any]] | None = None,
+    *,
+    allow_generic_fallback: bool = False,
+    max_tools: int = 96,
+) -> dict[str, Any]:
+    registry = tool_registry or {}
+    type_schema: dict[str, Any] = {"type": "string", "enum": ["auto", "function", "custom", "tool_search", "web_search"]}
+    namespace_schema: dict[str, Any] = {"type": "string"}
+    name_schema: dict[str, Any] = {"type": "string"}
+    if registry and not allow_generic_fallback:
+        names, namespaces, call_types = _tool_schema_enums(registry, max_tools=max_tools)
+        if names:
+            name_schema = {
+                "type": "string",
+                "enum": names,
+                "description": "Choose one exact local Codex tool name from this enum. For namespace/MCP tools, set namespace separately when applicable.",
+            }
+        if namespaces:
+            namespace_schema = {
+                "type": "string",
+                "enum": namespaces,
+                "description": "Use the exact namespace for namespace/MCP tools, otherwise empty string.",
+            }
+        if call_types:
+            type_schema = {
+                "type": "string",
+                "enum": call_types,
+                "description": "Native Codex output item kind for this local tool call.",
+            }
     return {
         "type": "object",
         "properties": {
-            "type": {"type": "string", "enum": ["auto", "function", "custom", "tool_search", "web_search"]},
-            "namespace": {"type": "string"},
-            "name": {"type": "string"},
+            "type": type_schema,
+            "namespace": namespace_schema,
+            "name": name_schema,
             "arguments": {
                 "type": "string",
                 "description": "Legacy fallback: JSON string arguments matching the requested tool schema.",
@@ -274,6 +302,53 @@ def _generic_tool_call_schema() -> dict[str, Any]:
         "required": ["type", "namespace", "name", "arguments", "input"],
         "additionalProperties": False,
     }
+
+
+def _tool_schema_enums(registry: dict[str, dict[str, Any]], *, max_tools: int) -> tuple[list[str], list[str], list[str]]:
+    names: list[str] = []
+    namespaces: list[str] = [""]
+    call_types: list[str] = []
+    seen_specs: set[tuple[str, str, str]] = set()
+    for alias, spec in sorted(registry.items()):
+        if not isinstance(spec, dict):
+            continue
+        output_name = str(spec.get("output_name") or alias or "").strip()
+        namespace = str(spec.get("namespace") or "").strip()
+        raw_type = str(spec.get("raw_type") or spec.get("call_type") or "function").strip()
+        call_type = str(spec.get("call_type") or "function").strip()
+        if raw_type == "custom" or output_name == "apply_patch":
+            call_type = "custom"
+        elif raw_type in {"tool_search", "web_search"}:
+            call_type = raw_type
+        key = (namespace, output_name, call_type)
+        if not output_name or key in seen_specs:
+            continue
+        seen_specs.add(key)
+        _append_unique(names, output_name)
+        if namespace:
+            _append_unique(names, f"{namespace}.{output_name}")
+            _append_unique(names, f"{namespace}__{output_name}")
+            _append_unique(names, output_name)
+            _append_unique(namespaces, namespace)
+        _append_unique(call_types, call_type)
+        if len(seen_specs) >= max_tools:
+            break
+    # Keep compatibility with discovery/rewrite paths when those are present.
+    if "tool_search" in registry:
+        _append_unique(names, "tool_search")
+        _append_unique(call_types, "tool_search")
+    if "web_search" in registry:
+        _append_unique(names, "web_search")
+        _append_unique(call_types, "web_search")
+    if not call_types:
+        call_types = ["auto", "function", "custom", "tool_search", "web_search"]
+    return names[: max_tools * 3], namespaces[: max_tools + 1], call_types
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    value = str(value or "")
+    if value not in values:
+        values.append(value)
 
 
 def _stricten_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -669,11 +744,12 @@ def parse_function_arguments(
             resolved = resolve_bridge_tool_call(fallback, tool_registry)
             if resolved:
                 tool_calls = [resolved]
-                if not answer:
-                    answer = "I need to resolve the right local tool first."
+                # Keep recovery invisible in the UI. Codex native tool discovery
+                # appears as a tool event, not repeated assistant prose.
+                answer = answer if isinstance(answer, str) else ""
             else:
                 mode = "answer"
-                answer = answer or "I need to resolve the right local tool first, but no valid local tool call was produced."
+                answer = answer or "需要继续操作，但代理没有拿到可执行的本地工具调用。请重试一次。"
 
     if not isinstance(answer, str):
         answer = json.dumps(answer, ensure_ascii=False)

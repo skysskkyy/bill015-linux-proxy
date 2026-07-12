@@ -149,7 +149,7 @@ def test_strict_unknown_tool_schema_allows_only_tool_search_discovery_without_re
         tool_registry={},
     )
     assert mode == "tool_call"
-    assert answer
+    assert answer == ""
     assert calls[0].call_type == "tool_search"
     assert "not_registered" in calls[0].arguments
 
@@ -201,6 +201,20 @@ def test_invalid_or_display_named_tool_calls_fall_back_to_discovery_not_user_err
     assert calls[0].call_type == "tool_search"
     assert "Chrome Integration" in calls[0].arguments
     assert "Level 0" in calls[0].arguments
+
+    blank_answer, _, _, blank_mode, blank_calls = parse_function_arguments(
+        json.dumps(
+            {
+                "mode": "tool_call",
+                "answer": "",
+                "tool_calls": [{"type": "function", "tool_name": "Chrome Integration", "parameters": {"action": "extract text"}}],
+            }
+        ),
+        tool_registry={"tool_search": {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}},
+    )
+    assert blank_mode == "tool_call"
+    assert blank_answer == ""
+    assert blank_calls[0].call_type == "tool_search"
 
 
 def test_nested_native_call_shape_is_recovered():
@@ -268,6 +282,10 @@ def test_emit_value_schema_is_upstream_compatible_and_tools_are_validated_locall
 
     assert "oneOf" not in json.dumps(payload["tools"], ensure_ascii=False)
     assert item_schema["properties"]["name"]["type"] == "string"
+    assert "enum" in item_schema["properties"]["name"]
+    assert "shell_command" in item_schema["properties"]["name"]["enum"]
+    assert "read_thread_terminal" in item_schema["properties"]["name"]["enum"]
+    assert "codex_app.read_thread_terminal" in item_schema["properties"]["name"]["enum"]
     assert item_schema["properties"]["arguments"]["type"] == "string"
     assert "shell_command" in payload["instructions"]
     assert "codex_app.read_thread_terminal" in payload["instructions"]
@@ -281,6 +299,28 @@ def test_emit_value_schema_is_upstream_compatible_and_tools_are_validated_locall
     )
     assert mode == "tool_call"
     assert calls[0].arguments == '{"command": "pwd", "timeout_ms": 10000}'
+
+
+def test_local_proxy_noise_messages_are_not_replayed_to_upstream():
+    from app.payloads import build_bill015_payload
+    from app.normalization import normalize_responses_request
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.5",
+            "input": [
+                {"role": "assistant", "content": [{"type": "output_text", "text": "I need to resolve the right local tool first."}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "[local proxy loop guard] stopped"}]},
+                {"role": "user", "content": "continue"},
+            ],
+        }
+    )
+    payload = build_bill015_payload(n)
+    text = json.dumps(payload["input"], ensure_ascii=False)
+
+    assert "I need to resolve the right local tool first" not in text
+    assert "[local proxy loop guard]" not in text
+    assert "continue" in text
 
 
 def test_loop_guard_does_not_abort_repeated_successful_tool_call():

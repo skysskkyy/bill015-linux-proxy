@@ -23,6 +23,7 @@ from app.proxy import (  # noqa: E402
     BridgeToolCall,
     build_bill015_payload,
     build_client_tool_catalog,
+    build_emit_value_schema,
     collect_bill015_result_from_events,
     normalize_responses_request,
     parse_function_arguments,
@@ -197,6 +198,11 @@ def main() -> None:
         and "Chrome Integration" in fallback_calls[0].arguments,
         "invalid/display tool call did not fall back to tool_search",
     )
+    blank_fallback_answer, _, _, blank_fallback_mode, blank_fallback_calls = parse_function_arguments(
+        '{"mode":"tool_call","answer":"","tool_calls":[{"tool_name":"Chrome Integration","parameters":{"action":"extract text"},"input":""}]}',
+        tool_registry={"tool_search": {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}},
+    )
+    assert_true(blank_fallback_mode == "tool_call" and blank_fallback_answer == "" and blank_fallback_calls[0].call_type == "tool_search", "fallback recovery leaked assistant text")
     print("[ok] function argument parser")
 
     tools = [
@@ -217,6 +223,8 @@ def main() -> None:
     assert_true('"type":"custom"' in catalog and 'codex_app.read_thread_terminal' in catalog and 'mcp__playwright.browser_tabs' in catalog and '"native_call"' in catalog, "tool catalog lost custom/namespace tools")
     assert_true('"type":"tool_search"' in catalog and registry["tool_search"]["call_type"] == "tool_search", "tool_search registry wrong")
     assert_true('"type":"web_search"' in catalog and registry["web_search"]["call_type"] == "web_search", "web_search registry wrong")
+    structured_schema = build_emit_value_schema(tool_registry=registry)["parameters"]["properties"]["tool_calls"]["items"]["properties"]["name"]
+    assert_true("enum" in structured_schema and "shell_command" in structured_schema["enum"] and "mcp__playwright.browser_tabs" in structured_schema["enum"], "tool_call schema did not expose structured tool-name enum")
     custom_answer, _, _, custom_mode, custom_calls = parse_function_arguments(json.dumps({
         "mode": "tool_call",
         "answer": "",
