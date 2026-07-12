@@ -337,15 +337,17 @@ def test_latest_user_request_stays_first_after_tool_feedback():
     )
 
     payload = build_bill015_payload(n)
-    state_content = payload["input"][0]["content"]
-    current_content = payload["input"][-1]["content"]
-
-    assert "Recent local Codex tool results" in state_content
-    assert "旧问题：解释 bill015_local_proxy" in state_content
-    assert "Current user request:\n新问题：修复第二句话回答旧问题" in current_content
+    assert [item.get("type", "message") for item in payload["input"]] == [
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+    assert payload["input"][0]["content"][0]["text"] == "旧问题：解释 bill015_local_proxy"
+    assert payload["input"][1]["name"] == "shell_command"
+    assert payload["input"][2]["output"].startswith("Exit code: 0")
     assert payload["input"][-1]["role"] == "user"
-    assert state_content.count("新问题：修复第二句话回答旧问题") == 0
-    assert current_content.count("新问题：修复第二句话回答旧问题") == 1
+    assert payload["input"][-1]["content"][0]["text"] == "新问题：修复第二句话回答旧问题"
 
 
 def test_system_developer_context_goes_to_instructions_and_current_user_is_last():
@@ -377,7 +379,74 @@ def test_system_developer_context_goes_to_instructions_and_current_user_is_last(
     dumped_input = json.dumps(payload["input"], ensure_ascii=False)
     assert "system rule A" not in dumped_input
     assert "developer rule B" not in dumped_input
-    assert payload["input"][-1] == {"role": "user", "content": "Current user request:\ncurrent request"}
+    assert payload["input"][-1] == {"type": "message", "role": "user", "content": "current request"}
+
+
+def test_bill015_payload_preserves_native_input_and_request_controls():
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.5",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "inspect"}]},
+                {"type": "function_call", "name": "shell_command", "call_id": "call_1", "arguments": "{\"command\":\"pwd\"}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "Exit code: 0\nOutput:\nS:/hack"},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            ],
+            "parallel_tool_calls": True,
+            "prompt_cache_key": "thread-cache-key",
+            "client_metadata": {"thread_id": "thread_1"},
+            "text": {"verbosity": "low"},
+        }
+    )
+    payload = build_bill015_payload(n)
+
+    assert payload["input"][1]["type"] == "function_call"
+    assert payload["input"][2]["type"] == "function_call_output"
+    assert payload["input"][-1]["content"][0]["text"] == "continue"
+    assert "Local proxy state for continuity" not in json.dumps(payload["input"], ensure_ascii=False)
+    assert payload["parallel_tool_calls"] is False
+    assert payload["include"] == ["reasoning.encrypted_content"]
+    assert payload["prompt_cache_key"] == "thread-cache-key"
+    assert payload["client_metadata"] == {"thread_id": "thread_1"}
+    assert payload["text"] == {"verbosity": "low"}
+
+
+def test_bill015_payload_normalizes_call_output_pairs_without_truncating_outputs():
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    long_output = "A" * 20000
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.5",
+            "input": [
+                {"type": "function_call_output", "call_id": "orphan", "output": "should be removed"},
+                {"type": "function_call", "name": "shell_command", "call_id": "pending", "arguments": "{\"command\":\"sleep 1\"}"},
+                {"type": "function_call", "name": "shell_command", "call_id": "done", "arguments": "{\"command\":\"big\"}"},
+                {"type": "function_call_output", "call_id": "done", "output": long_output},
+                {"type": "tool_search_call", "call_id": "search_pending", "execution": "client", "arguments": {"query": "node_repl"}},
+            ],
+        }
+    )
+    payload = build_bill015_payload(n)
+    items = payload["input"]
+
+    assert all(item.get("call_id") != "orphan" for item in items)
+    pending_idx = next(i for i, item in enumerate(items) if item.get("call_id") == "pending")
+    assert items[pending_idx + 1] == {"type": "function_call_output", "call_id": "pending", "output": "aborted"}
+    done_output = next(item for item in items if item.get("type") == "function_call_output" and item.get("call_id") == "done")
+    assert done_output["output"] == long_output
+    search_idx = next(i for i, item in enumerate(items) if item.get("call_id") == "search_pending")
+    assert items[search_idx + 1] == {
+        "type": "tool_search_output",
+        "call_id": "search_pending",
+        "status": "completed",
+        "execution": "client",
+        "tools": [],
+    }
 
 
 def test_latest_parallel_tool_batch_keeps_more_than_three_outputs():

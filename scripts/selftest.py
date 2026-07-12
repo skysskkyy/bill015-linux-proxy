@@ -143,7 +143,8 @@ def main() -> None:
     assert_true("Exit code: 0" in shell_loop_n.latest_tool_summary, "shell exit code missing from tool feedback")
     assert_true(shell_loop_n.latest_tool_failed is False, "successful shell marked failed")
     shell_payload = build_bill015_payload(shell_loop_n)
-    assert_true("Recent local Codex tool results" in shell_payload["input"][0]["content"] and shell_payload["input"][-1]["content"].startswith("Current user request:"), "tool feedback/current request layout wrong")
+    assert_true(shell_payload["input"][0]["type"] == "function_call" and shell_payload["input"][1]["type"] == "function_call_output", "typed tool history not preserved")
+    assert_true(shell_payload["input"][1]["output"].startswith("Exit code: 0"), "tool output payload not preserved")
     print("[ok] shell_command tool-loop feedback")
 
     patch_loop_n = normalize_responses_request({
