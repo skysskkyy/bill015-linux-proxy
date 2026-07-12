@@ -527,17 +527,16 @@ def _make_tool_search_call(query: str, limit: int = 20) -> BridgeToolCall:
 def expand_deferred_tool_searches(
     calls: list[BridgeToolCall],
     tool_registry: dict[str, dict[str, Any]] | None = None,
+    cfg: Settings = settings,
 ) -> list[BridgeToolCall]:
     """Ask native Codex tool_search to expose richer deferred MCP tools.
 
-    In exploit/emit_value mode the upstream model does not participate in
-    Codex's native deferred-tool search loop directly. A narrow query such as
-    "Playwright" often exposes only tabs/network tools. When a turn is clearly
-    about browser/MCP/jshook/node tooling, append one broad native
-    tool_search call so Codex reveals the next useful family without flooding
-    the local tool loop. Older versions appended up to five extra searches,
-    which made Codex spend many turns discovering tools instead of editing.
+    Native Codex only executes the tool_search calls the model explicitly asks
+    for. Keep that behavior by default; the optional expansion flag is retained
+    for targeted experiments but should stay disabled for native-like operation.
     """
+    if not cfg.tool_bridge_auto_expand_search:
+        return calls
     if not calls:
         return calls
     registry = tool_registry or {}
@@ -589,7 +588,7 @@ def parse_function_arguments(
             resolved = resolve_bridge_tool_call(call, tool_registry)
             if resolved:
                 tool_calls.append(resolved)
-        tool_calls = expand_deferred_tool_searches(tool_calls, tool_registry)
+        tool_calls = expand_deferred_tool_searches(tool_calls, tool_registry, cfg)
         if not tool_calls:
             mode = "answer"
             answer = "[local proxy] tool_call mode requested but no valid tool_calls were provided."

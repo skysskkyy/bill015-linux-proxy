@@ -120,8 +120,8 @@ class Settings:
     max_output_tokens: int = field(default_factory=lambda: _env_int("BILL015_MAX_OUTPUT_TOKENS", "bill015.max_output_tokens", 8192))
     compaction_max_output_tokens: int = field(default_factory=lambda: _env_int("BILL015_COMPACTION_MAX_OUTPUT_TOKENS", "bill015.compaction_max_output_tokens", 8192))
     strict_zero: bool = field(default_factory=lambda: _env_bool("BILL015_STRICT_ZERO", "bill015.strict_zero", True))
-    reasoning_effort: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_EFFORT", "reasoning.effort", "high"))
-    reasoning_summary: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_SUMMARY", "reasoning.summary", "auto"))
+    reasoning_effort: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_EFFORT", "reasoning.effort", ""))
+    reasoning_summary: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_SUMMARY", "reasoning.summary", ""))
     max_answer_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_ANSWER_CHARS", "bill015.max_answer_chars", 65536))
     max_request_bytes: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_REQUEST_BYTES", "limits.max_request_bytes", 1048576))
     max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 2))
@@ -156,6 +156,7 @@ class Settings:
     responses_typed_keepalive: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_TYPED_KEEPALIVE", "responses_events.typed_keepalive", False))
     responses_chunk_size: int = field(default_factory=lambda: _env_int("BILL015_RESPONSES_CHUNK_SIZE", "responses_events.chunk_size", 256))
     tool_bridge_allow_unknown_tools: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_ALLOW_UNKNOWN_TOOLS", "tool_bridge.allow_unknown_tools", False))
+    tool_bridge_auto_expand_search: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_AUTO_EXPAND_SEARCH", "tool_bridge.auto_expand_search", False))
 
     @property
     def upstream_api_key(self) -> str:

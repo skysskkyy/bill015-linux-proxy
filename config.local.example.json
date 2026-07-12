@@ -70,6 +70,7 @@
     "token": "change-me-local-admin"
   },
   "tool_bridge": {
-    "allow_unknown_tools": false
+    "allow_unknown_tools": false,
+    "auto_expand_search": false
   }
 }

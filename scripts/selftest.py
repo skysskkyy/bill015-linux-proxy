@@ -249,7 +249,7 @@ def main() -> None:
         "tool_calls":[{"type":"tool_search","name":"tool_search","arguments":"{\"query\":\"Playwright browser cookies DOM network tools\",\"limit\":8}","input":""}],
     }), tool_registry=registry)
     browser_queries = "\n".join(c.arguments for c in browser_calls if c.call_type == "tool_search")
-    assert_true(browser_mode == "tool_call" and len([c for c in browser_calls if c.call_type == "tool_search"]) <= 2 and "playwright browser navigate evaluate" in browser_queries, "browser/MCP tool_search expansion failed")
+    assert_true(browser_mode == "tool_call" and len([c for c in browser_calls if c.call_type == "tool_search"]) == 1 and "Playwright browser cookies" in browser_queries, "browser/MCP tool_search native-like dispatch failed")
     deferred_n = normalize_responses_request({"model":"gpt-5.5","input":[{"type":"tool_search_output","call_id":"call_ts","status":"completed","execution":"client","tools":[{"type":"namespace","name":"mcp__node_repl","tools":[{"type":"function","name":"js","parameters":{"type":"object","properties":{"code":{"type":"string"}},"required":["code"],"additionalProperties":False}}]}]}],"tools":tools})
     assert_true("mcp__node_repl.js" in deferred_n.tools_catalog and "js" in deferred_n.tool_registry, "deferred tool_search_output tools not cataloged")
     assert_true("mcp__node_repl.js" in deferred_n.latest_tool_summary, "deferred tools missing from tool feedback")

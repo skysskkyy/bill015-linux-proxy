@@ -116,7 +116,9 @@ def test_unknown_tools_disabled_by_default_without_local_config(tmp_path):
                 "print(settings.tool_bridge_allow_unknown_tools, settings.max_output_tokens, "
                 "settings.compaction_max_output_tokens, settings.max_answer_chars, "
                 "settings.upstream_timeout_seconds, settings.args_done_timeout_ms, "
-                "settings.upstream_idle_timeout_ms, settings.upstream_retries)"
+                "settings.upstream_idle_timeout_ms, settings.upstream_retries, "
+                "settings.reasoning_effort, settings.reasoning_summary, "
+                "settings.tool_bridge_auto_expand_search)"
             ),
         ],
         cwd=os.getcwd(),
@@ -127,7 +129,7 @@ def test_unknown_tools_disabled_by_default_without_local_config(tmp_path):
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == "False 8192 8192 65536 300.0 300000 180000 0"
+    assert proc.stdout.strip() == "False 8192 8192 65536 300.0 300000 180000 0   False"
 
 
 def test_strict_unknown_tool_schema_allows_only_tool_search_discovery_without_registry(monkeypatch):
@@ -268,7 +270,7 @@ def test_loop_guard_stops_repeated_successful_tool_call():
     assert "loop guard" in result.answer
 
 
-def test_tool_search_auto_expansion_is_capped_to_one_extra_search():
+def test_tool_search_auto_expansion_is_disabled_by_default():
     from app.tool_bridge import parse_function_arguments
 
     _, _, _, mode, calls = parse_function_arguments(
@@ -291,7 +293,7 @@ def test_tool_search_auto_expansion_is_capped_to_one_extra_search():
     )
 
     assert mode == "tool_call"
-    assert len([c for c in calls if c.call_type == "tool_search"]) <= 2
+    assert len([c for c in calls if c.call_type == "tool_search"]) == 1
 
 
 def test_payload_output_budgets_and_compaction_budget(monkeypatch):
@@ -412,6 +414,21 @@ def test_bill015_payload_preserves_native_input_and_request_controls():
     assert payload["prompt_cache_key"] == "thread-cache-key"
     assert payload["client_metadata"] == {"thread_id": "thread_1"}
     assert payload["text"] == {"verbosity": "low"}
+    assert "If asked what model you are" not in payload["instructions"]
+
+
+def test_bill015_payload_omits_reasoning_when_client_and_config_are_default(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "reasoning_effort", "")
+    monkeypatch.setattr(settings, "reasoning_summary", "")
+    n = normalize_responses_request({"model": "gpt-5.5", "input": "hello"})
+
+    payload = build_bill015_payload(n)
+
+    assert "reasoning" not in payload
 
 
 def test_bill015_payload_normalizes_call_output_pairs_without_truncating_outputs():

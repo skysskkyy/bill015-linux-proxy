@@ -90,6 +90,7 @@ class AdminConfig(StrictConfigModel):
 
 class ToolBridgeConfig(StrictConfigModel):
     allow_unknown_tools: bool | None = None
+    auto_expand_search: bool | None = None
 
 
 class LocalConfigSchema(StrictConfigModel):

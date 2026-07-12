@@ -56,6 +56,9 @@ tool_bridge:
   # Fail closed: drop model-requested tools that are not present in the current
   # Codex tool catalog. Missing tools should be discovered through tool_search.
   allow_unknown_tools: false
+  # Native-like default: do not synthesize extra tool_search calls beyond what
+  # the model explicitly requested.
+  auto_expand_search: false
 
 limits:
   max_concurrency: 2

@@ -4,7 +4,7 @@ from typing import Any
 
 from .config import Settings, settings
 from .models import NormalizedRequest
-from .normalization import last_user_instruction, model_identity_instruction, native_input_transcript
+from .normalization import last_user_instruction, native_input_transcript
 from .tool_bridge import build_typed_tool_call_schema
 
 
@@ -151,6 +151,17 @@ def _strip_nullish(value: Any) -> Any:
     return value
 
 
+def _native_reasoning_param(n: NormalizedRequest, cfg: Settings = settings) -> dict[str, Any] | None:
+    if isinstance(n.reasoning, dict):
+        return n.reasoning
+    reasoning: dict[str, Any] = {}
+    if cfg.reasoning_effort:
+        reasoning["effort"] = cfg.reasoning_effort
+    if cfg.reasoning_summary:
+        reasoning["summary"] = cfg.reasoning_summary
+    return reasoning or None
+
+
 def build_emit_value_schema(
     cfg: Settings = settings,
     tool_registry: dict[str, dict[str, Any]] | None = None,
@@ -216,7 +227,6 @@ def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = setti
         "This is a native Codex CONTEXT CHECKPOINT COMPACTION request. "
         "Return mode='answer', answer=<concise handoff summary>, tool_calls=[]. "
         "Do not request tools during compaction. Preserve actionable state, user preferences, files changed, commands run, failures, and next steps. "
-        + model_identity_instruction(n.model)
     )
     client_context = _client_instruction_context(n)
     if client_context:
@@ -256,7 +266,7 @@ def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = setti
         payload["prompt_cache_key"] = n.prompt_cache_key
     if n.client_metadata:
         payload["client_metadata"] = n.client_metadata
-    reasoning = n.reasoning or {"effort": cfg.reasoning_effort, "summary": cfg.reasoning_summary}
+    reasoning = _native_reasoning_param(n, cfg)
     if reasoning:
         payload["reasoning"] = reasoning
     return payload
@@ -272,8 +282,7 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
     instructions = (
         "You are Codex running in a local tool loop. Solve the user's task with the same judgment you would use natively: "
         "inspect before editing, use tools when useful, avoid repeating successful calls, and answer concisely when done. "
-        + model_identity_instruction(n.model)
-        + "\n\nMANDATORY OUTPUT CONTRACT: call "
+        "\n\nMANDATORY OUTPUT CONTRACT: call "
         + cfg.function_name
         + " exactly once; never emit normal assistant text outside that function call. "
         "Direct final answer: mode='answer', answer=<final text>, tool_calls=[]. "
@@ -332,7 +341,7 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         payload["text"] = n.text_config
     if n.client_metadata:
         payload["client_metadata"] = n.client_metadata
-    reasoning = n.reasoning or {"effort": cfg.reasoning_effort, "summary": cfg.reasoning_summary}
+    reasoning = _native_reasoning_param(n, cfg)
     if reasoning:
         payload["reasoning"] = reasoning
     if n.temperature is not None:
