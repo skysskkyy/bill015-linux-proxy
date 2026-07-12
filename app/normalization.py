@@ -449,7 +449,13 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
     request_kind, is_compaction = detect_request_kind(body)
     base_instructions = flatten_content(body.get("instructions", ""))
     context_budget = _context_token_budget(body, usage_estimate.input_tokens, cfg)
-    system_context, developer_context, ordered_context = extract_role_contexts(raw_input, max_tokens=max(4_000, context_budget // 5))
+    if is_compaction:
+        system_context, developer_context, ordered_context = extract_role_contexts(
+            raw_input,
+            max_tokens=max(16_000, usage_estimate.input_tokens),
+        )
+    else:
+        system_context, developer_context, ordered_context = "", "", ""
     instructions_sections: list[str] = []
     if base_instructions:
         instructions_sections.append("=== Top-level Responses instructions ===\n" + base_instructions)

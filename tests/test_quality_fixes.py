@@ -404,7 +404,7 @@ def test_latest_user_request_stays_first_after_tool_feedback():
     assert payload["input"][-1]["content"][0]["text"] == "新问题：修复第二句话回答旧问题"
 
 
-def test_system_developer_context_goes_to_instructions_and_current_user_is_last():
+def test_system_developer_context_stays_typed_in_normal_input():
     from app.normalization import normalize_responses_request
     from app.payloads import build_bill015_payload
 
@@ -425,15 +425,37 @@ def test_system_developer_context_goes_to_instructions_and_current_user_is_last(
 
     upstream_instructions = payload["instructions"]
     assert "top-level root rule" in upstream_instructions
-    assert "system rule A" in upstream_instructions
-    assert "developer rule B" in upstream_instructions
-    assert "system rule C" in upstream_instructions
-    assert upstream_instructions.index("system rule A") < upstream_instructions.index("developer rule B") < upstream_instructions.index("system rule C")
+    dumped_input = json.dumps(payload["input"], ensure_ascii=False)
+    assert "system rule A" in dumped_input
+    assert "developer rule B" in dumped_input
+    assert "system rule C" in dumped_input
+    assert payload["input"][0] == {"type": "message", "role": "system", "content": "system rule A"}
+    assert payload["input"][1] == {"type": "message", "role": "developer", "content": "developer rule B"}
+    assert payload["input"][-1] == {"type": "message", "role": "user", "content": "current request"}
+
+
+def test_large_developer_context_is_not_budget_clipped_in_normal_turn():
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    marker = "UNIQUE_DEV_CONTEXT_TAIL"
+    large_developer = "developer prefix " + ("重要规则 " * 20_000) + marker
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.5",
+            "instructions": "top-level root rule",
+            "input": [
+                {"type": "message", "role": "developer", "content": large_developer},
+                {"type": "message", "role": "user", "content": "current request"},
+            ],
+        }
+    )
+    payload = build_bill015_payload(n)
 
     dumped_input = json.dumps(payload["input"], ensure_ascii=False)
-    assert "system rule A" not in dumped_input
-    assert "developer rule B" not in dumped_input
-    assert payload["input"][-1] == {"type": "message", "role": "user", "content": "current request"}
+    assert marker in dumped_input
+    assert "token-budget clipped" not in dumped_input
+    assert marker not in payload["instructions"]
 
 
 def test_bill015_payload_preserves_native_input_and_request_controls():

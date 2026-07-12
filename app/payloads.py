@@ -41,16 +41,13 @@ def _append_section(parts: list[str], title: str, body: str) -> None:
 def _client_instruction_context(n: NormalizedRequest) -> str:
     """Build the high-priority upstream `instructions` client context.
 
-    The old bridge flattened system/developer messages into a giant user
-    transcript, making hierarchy-dependent instructions easy to ignore.  This
-    keeps all client policy/context in upstream `instructions` with explicit
-    stable boundaries while leaving the latest user request as a user item.
+    Match native Codex's split: top-level base instructions belong in
+    `instructions`; developer/context message items stay in `input[]` for normal
+    turns. Compaction requests may still pass extracted context here because the
+    compact endpoint returns a replacement history.
     """
     parts: list[str] = []
     _append_section(parts, "Client instructions/system/developer context", n.instructions)
-    if not n.instructions:
-        _append_section(parts, "Client system context", n.system_context)
-        _append_section(parts, "Client developer context", n.developer_context)
     return "\n\n".join(parts)
 
 
@@ -62,8 +59,10 @@ def _normal_input_items(n: NormalizedRequest) -> list[dict[str, str]]:
     items.  The previous local bridge flattened that structure into a few large
     prose sections, which made old turns and latest tool output look like a new
     user prompt and caused context/intent drift.  Preserve the original item
-    sequence for ordinary turns, only moving system/developer items into
-    `instructions` where they belong.
+    sequence for ordinary turns, including developer/context messages. Native
+    Codex does not flatten developer messages into a budgeted prose summary for
+    normal turns; doing so loses AGENTS/skills context before Codex's own
+    compaction has a chance to run.
     """
     if isinstance(n.raw_input, list):
         items: list[dict[str, Any]] = []
@@ -72,9 +71,6 @@ def _normal_input_items(n: NormalizedRequest) -> list[dict[str, str]]:
                 text = str(item).strip()
                 if text:
                     items.append({"role": "user", "content": text})
-                continue
-            role = str(item.get("role") or "")
-            if role in {"system", "developer"}:
                 continue
             items.append(_strip_nullish(item))
         if items:
