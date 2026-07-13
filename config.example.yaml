@@ -20,7 +20,11 @@ model:
   force_default: false
 
 bill015:
+  bridge_strategy: native_tool_first
   function_name: emit_value
+  final_answer_tool_name: submit_final_answer
+  native_tool_choice: required
+  native_parallel_tool_calls: false
   answer_field: answer
   max_output_tokens: 8192
   compaction_max_output_tokens: 8192

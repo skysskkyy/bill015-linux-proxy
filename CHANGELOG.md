@@ -2,6 +2,17 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.3.7] - 2026-07-13
+
+### Changed
+- Defaulted `bill015.bridge_strategy` to `native_tool_first`, exposing the current Codex native tools directly upstream instead of forcing every action through the synthetic `emit_value.tool_calls` wrapper.
+- Added `submit_final_answer` as the final-answer tool so direct answers still end at a function-call arguments boundary.
+- Kept `emit_value` as an explicit fallback via `bill015.bridge_strategy="emit_value"` and retained it for compaction requests.
+
+### Fixed
+- Parsed direct native function calls, custom tool input, `tool_search_call`/`web_search_call`/`computer_call` output items, and legacy nameless `emit_value` arguments from the abort boundary.
+- Updated dry-run/selftest/config docs for the new native-tool-first default.
+
 ## [0.3.6] - 2026-07-12
 
 ### Changed

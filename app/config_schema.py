@@ -32,7 +32,11 @@ class ModelConfig(StrictConfigModel):
 
 
 class Bill015Config(StrictConfigModel):
+    bridge_strategy: Literal["native_tool_first", "emit_value"] | None = None
     function_name: str | None = None
+    final_answer_tool_name: str | None = None
+    native_tool_choice: str | None = None
+    native_parallel_tool_calls: bool | None = None
     answer_field: str | None = None
     max_output_tokens: int | None = None
     compaction_max_output_tokens: int | None = None

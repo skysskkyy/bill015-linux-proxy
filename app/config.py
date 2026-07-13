@@ -115,7 +115,11 @@ class Settings:
     default_model: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_MODEL", "model.default", "gpt-5.5"))
     model_aliases: Dict[str, str] = field(default_factory=lambda: _cfg_dict("model.aliases", {"codex-gpt55": "gpt-5.5", "codex-gpt54": "gpt-5.4"}))
     force_default_model: bool = field(default_factory=lambda: _env_bool("LOCAL_PROXY_FORCE_DEFAULT_MODEL", "model.force_default", False))
+    bridge_strategy: str = field(default_factory=lambda: _env_str("BILL015_BRIDGE_STRATEGY", "bill015.bridge_strategy", "native_tool_first"))
     function_name: str = field(default_factory=lambda: _env_str("BILL015_FUNCTION_NAME", "bill015.function_name", "emit_value"))
+    final_answer_tool_name: str = field(default_factory=lambda: _env_str("BILL015_FINAL_ANSWER_TOOL_NAME", "bill015.final_answer_tool_name", "submit_final_answer"))
+    native_tool_choice: str = field(default_factory=lambda: _env_str("BILL015_NATIVE_TOOL_CHOICE", "bill015.native_tool_choice", "required"))
+    native_parallel_tool_calls: bool = field(default_factory=lambda: _env_bool("BILL015_NATIVE_PARALLEL_TOOL_CALLS", "bill015.native_parallel_tool_calls", False))
     answer_field: str = field(default_factory=lambda: _env_str("BILL015_ANSWER_FIELD", "bill015.answer_field", "answer"))
     max_output_tokens: int = field(default_factory=lambda: _env_int("BILL015_MAX_OUTPUT_TOKENS", "bill015.max_output_tokens", 8192))
     compaction_max_output_tokens: int = field(default_factory=lambda: _env_int("BILL015_COMPACTION_MAX_OUTPUT_TOKENS", "bill015.compaction_max_output_tokens", 8192))
@@ -195,4 +199,6 @@ class Settings:
 
 settings = Settings()
 settings.validate_mode()
+if settings.bridge_strategy not in {"native_tool_first", "emit_value"}:
+    settings.bridge_strategy = "native_tool_first"
 settings.config_warnings = CONFIG_WARNINGS

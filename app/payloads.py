@@ -4,7 +4,7 @@ from typing import Any
 
 from .config import Settings, settings
 from .models import NormalizedRequest
-from .normalization import last_user_instruction, native_input_transcript
+from .normalization import collect_deferred_tools_from_input, last_user_instruction, native_input_transcript
 from .tool_bridge import build_typed_tool_call_schema
 
 
@@ -246,6 +246,74 @@ def build_emit_value_schema(
         "strict": True,
     }
 
+
+def build_final_answer_tool_schema(cfg: Settings = settings) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": cfg.final_answer_tool_name,
+        "description": (
+            "Return the final user-facing answer. Use this only when the task is complete "
+            "and no more local Codex tool action is needed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                cfg.answer_field: {
+                    "type": "string",
+                    "description": "Final answer to show to the user.",
+                }
+            },
+            "required": [cfg.answer_field],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+
+def _tool_identity(tool: dict[str, Any]) -> tuple[str, str]:
+    return (str(tool.get("type") or ""), str(tool.get("name") or ""))
+
+
+def _native_tools_for_upstream(n: NormalizedRequest, cfg: Settings) -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(tool: Any) -> None:
+        if not isinstance(tool, dict):
+            return
+        ident = _tool_identity(tool)
+        if ident in seen:
+            return
+        seen.add(ident)
+        tools.append(_strip_nullish(tool))
+
+    if isinstance(n.raw_tools, list):
+        for tool in n.raw_tools:
+            add(tool)
+    for tool in collect_deferred_tools_from_input(n.raw_input):
+        add(tool)
+
+    # Final answers are a function call too, so BILL-015 can still close the
+    # upstream stream at response.function_call_arguments.done without waiting
+    # for a normal assistant completion.
+    add(build_final_answer_tool_schema(cfg))
+    return tools
+
+
+def _base_bridge_instructions() -> str:
+    return (
+        "You are Codex running in a local tool loop. Solve the user's task with the same judgment you would use natively: "
+        "inspect before editing, use tools when useful, avoid repeating successful calls, and answer concisely when done. "
+    )
+
+
+def _append_common_context(instructions: str, n: NormalizedRequest) -> str:
+    client_context = _client_instruction_context(n)
+    if client_context:
+        instructions += "\n\n" + client_context
+    return instructions
+
+
 def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dict[str, Any]:
     max_tokens = n.max_output_tokens or cfg.compaction_max_output_tokens
     try:
@@ -309,10 +377,21 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         max_tokens = min(int(max_tokens), cfg.max_output_tokens)
     except Exception:
         max_tokens = cfg.max_output_tokens
+    if cfg.bridge_strategy == "emit_value":
+        return build_emit_value_payload(n, cfg, max_tokens)
+    return build_native_tool_first_payload(n, cfg, max_tokens)
+
+
+def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max_tokens: int | None = None) -> dict[str, Any]:
+    if max_tokens is None:
+        max_tokens = n.max_output_tokens or cfg.max_output_tokens
+        try:
+            max_tokens = min(int(max_tokens), cfg.max_output_tokens)
+        except Exception:
+            max_tokens = cfg.max_output_tokens
     instructions = (
-        "You are Codex running in a local tool loop. Solve the user's task with the same judgment you would use natively: "
-        "inspect before editing, use tools when useful, avoid repeating successful calls, and answer concisely when done. "
-        "\n\nMANDATORY OUTPUT CONTRACT: call "
+        _base_bridge_instructions()
+        + "\n\nMANDATORY OUTPUT CONTRACT: call "
         + cfg.function_name
         + " exactly once; never emit normal assistant text outside that function call. "
         "Direct final answer: mode='answer', answer=<final text>, tool_calls=[]. "
@@ -331,9 +410,7 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         "\n- Shell: {\"mode\":\"tool_call\",\"answer\":\"I’ll inspect the project structure first.\",\"tool_calls\":[{\"type\":\"function\",\"namespace\":\"\",\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"Get-ChildItem\\\"}\",\"input\":\"\"}]}"
         "\n- Patch: {\"mode\":\"tool_call\",\"answer\":\"I found the narrow fix and will patch it now.\",\"tool_calls\":[{\"type\":\"custom\",\"namespace\":\"\",\"name\":\"apply_patch\",\"arguments\":\"{}\",\"input\":\"*** Begin Patch\\n...\\n*** End Patch\"}]}"
     )
-    client_context = _client_instruction_context(n)
-    if client_context:
-        instructions += "\n\n" + client_context
+    instructions = _append_common_context(instructions, n)
     if n.tools_catalog:
         instructions += (
             "\n\nCodex native tool catalog for this turn (lossless JSON; use exact names/namespaces from here; local proxy validates requested tools against this registry):\n"
@@ -365,6 +442,62 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         # Codex tool calls, so provider-level parallelism is both unnecessary
         # and a source of malformed duplicate emit_value calls.
         "parallel_tool_calls": False,
+        "include": ["reasoning.encrypted_content"],
+    }
+    if n.prompt_cache_key:
+        payload["prompt_cache_key"] = n.prompt_cache_key
+    if n.text_config:
+        payload["text"] = n.text_config
+    if n.client_metadata:
+        payload["client_metadata"] = n.client_metadata
+    reasoning = _native_reasoning_param(n, cfg)
+    if reasoning:
+        payload["reasoning"] = reasoning
+    if n.temperature is not None:
+        payload["temperature"] = n.temperature
+    return payload
+
+
+def build_native_tool_first_payload(n: NormalizedRequest, cfg: Settings = settings, max_tokens: int | None = None) -> dict[str, Any]:
+    if max_tokens is None:
+        max_tokens = n.max_output_tokens or cfg.max_output_tokens
+        try:
+            max_tokens = min(int(max_tokens), cfg.max_output_tokens)
+        except Exception:
+            max_tokens = cfg.max_output_tokens
+    native_tools = _native_tools_for_upstream(n, cfg)
+    non_final_tools = [
+        tool
+        for tool in native_tools
+        if not (tool.get("type") == "function" and tool.get("name") == cfg.final_answer_tool_name)
+    ]
+    instructions = (
+        _base_bridge_instructions()
+        + "\n\nMANDATORY OUTPUT CONTRACT: never emit normal assistant text. "
+        "Always call exactly one tool so the local proxy can close the upstream stream at the tool arguments boundary. "
+        f"If the task is complete, call `{cfg.final_answer_tool_name}` with `{cfg.answer_field}` set to the final answer. "
+    )
+    if non_final_tools:
+        instructions += (
+            "If more local action is needed, call the exact native Codex tool directly from the provided tools list. "
+            "Do not wrap native tool calls in another JSON protocol. "
+            "For custom/FREEFORM tools such as apply_patch, provide the raw custom input expected by that tool. "
+            "For namespace/MCP tools, preserve the namespace/name selected by the native tool schema. "
+            "After tool results appear in a later turn, inspect them first, then call the next native tool or final-answer tool."
+        )
+    else:
+        instructions += f"No local action tools are registered in this request; call `{cfg.final_answer_tool_name}` only."
+    instructions = _append_common_context(instructions, n)
+    payload: dict[str, Any] = {
+        "model": n.model,
+        "stream": True,
+        "store": False,
+        "max_output_tokens": max_tokens,
+        "instructions": instructions,
+        "input": _normal_input_items(n),
+        "tools": native_tools,
+        "tool_choice": cfg.native_tool_choice or "required",
+        "parallel_tool_calls": bool(cfg.native_parallel_tool_calls and n.parallel_tool_calls),
         "include": ["reasoning.encrypted_content"],
     }
     if n.prompt_cache_key:

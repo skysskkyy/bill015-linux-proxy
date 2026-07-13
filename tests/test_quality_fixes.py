@@ -245,11 +245,13 @@ def test_nested_native_call_shape_is_recovered():
     assert calls[0].arguments == '{"level": 0}'
 
 
-def test_emit_value_schema_is_upstream_compatible_and_tools_are_validated_locally():
+def test_emit_value_schema_is_upstream_compatible_and_tools_are_validated_locally(monkeypatch):
+    from app.config import settings
     from app.normalization import normalize_responses_request
     from app.payloads import build_bill015_payload
     from app.tool_bridge import parse_function_arguments
 
+    monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
     tools = [
         {
             "type": "function",
@@ -301,9 +303,47 @@ def test_emit_value_schema_is_upstream_compatible_and_tools_are_validated_locall
     assert calls[0].arguments == '{"command": "pwd", "timeout_ms": 10000}'
 
 
-def test_local_proxy_noise_messages_are_not_replayed_to_upstream():
-    from app.payloads import build_bill015_payload
+def test_native_tool_first_payload_exposes_real_tools_and_final_answer(monkeypatch):
+    from app.config import settings
     from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "bridge_strategy", "native_tool_first")
+    monkeypatch.setattr(settings, "final_answer_tool_name", "submit_final_answer")
+    monkeypatch.setattr(settings, "native_tool_choice", "required")
+    tools = [
+        {
+            "type": "function",
+            "name": "shell_command",
+            "description": "run shell",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+        {"type": "custom", "name": "apply_patch", "description": "patch", "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}},
+    ]
+
+    n = normalize_responses_request({"model": "gpt-5.5", "input": "list files", "tools": tools, "parallel_tool_calls": True})
+    payload = build_bill015_payload(n)
+
+    tool_names = [tool.get("name") for tool in payload["tools"]]
+    assert "shell_command" in tool_names
+    assert "apply_patch" in tool_names
+    assert "submit_final_answer" in tool_names
+    assert payload["tools"][0]["name"] == "shell_command"
+    assert payload["tool_choice"] == "required"
+    assert payload["parallel_tool_calls"] is False
+    assert "emit_value" not in tool_names
+    assert "submit_final_answer" in payload["instructions"]
+    assert "Do not wrap native tool calls" in payload["instructions"]
+
+
+def test_local_proxy_noise_messages_are_not_replayed_to_upstream():
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
 
     n = normalize_responses_request(
         {
@@ -372,7 +412,7 @@ def test_loop_guard_does_not_abort_repeated_successful_tool_call():
 
 
 def test_loop_guard_filters_repeated_success_from_mixed_batch():
-    from app.models import BridgeToolCall, Bill015Result
+    from app.models import Bill015Result, BridgeToolCall
     from app.normalization import normalize_responses_request
     from app.upstream import apply_tool_loop_guard
 
@@ -402,7 +442,7 @@ def test_loop_guard_filters_repeated_success_from_mixed_batch():
 
 
 def test_loop_guard_allows_corrected_retry_after_failed_tool_name():
-    from app.models import BridgeToolCall, Bill015Result
+    from app.models import Bill015Result, BridgeToolCall
     from app.normalization import normalize_responses_request
     from app.upstream import apply_tool_loop_guard
 
@@ -428,7 +468,7 @@ def test_loop_guard_allows_corrected_retry_after_failed_tool_name():
 
 
 def test_loop_guard_stops_exact_failed_tool_replay():
-    from app.models import BridgeToolCall, Bill015Result
+    from app.models import Bill015Result, BridgeToolCall
     from app.normalization import normalize_responses_request
     from app.upstream import apply_tool_loop_guard
 
@@ -1003,3 +1043,69 @@ def test_execute_bill015_retries_pre_stream_http_500(monkeypatch):
     assert result.answer == "OK"
     assert result.args_done_seen is True
     assert result.aborted is True
+
+
+def test_native_tool_first_direct_function_and_final_answer_are_parsed(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.models import NormalizedRequest
+    from app.sse import SSEEvent
+
+    monkeypatch.setattr(settings, "final_answer_tool_name", "submit_final_answer")
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="x", want_stream=False, client_api="responses", is_primary_path=True)
+
+    tool_result = upstream.collect_bill015_result_from_events(
+        [
+            SSEEvent("response.output_item.added", '{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_shell","name":"shell_command"}}'),
+            SSEEvent("response.function_call_arguments.done", '{"type":"response.function_call_arguments.done","item_id":"fc_1","call_id":"call_shell","arguments":"{\\"command\\":\\"pwd\\"}"}'),
+        ],
+        n,
+    )
+    assert tool_result.bridge_mode == "tool_call"
+    assert tool_result.tool_calls[0].id == "call_shell"
+    assert tool_result.tool_calls[0].name == "shell_command"
+    assert tool_result.tool_calls[0].arguments == '{"command":"pwd"}'
+    assert tool_result.aborted is True
+
+    final_result = upstream.collect_bill015_result_from_events(
+        [
+            SSEEvent("response.output_item.added", '{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_2","call_id":"call_final","name":"submit_final_answer"}}'),
+            SSEEvent("response.function_call_arguments.done", '{"type":"response.function_call_arguments.done","item_id":"fc_2","call_id":"call_final","arguments":"{\\"answer\\":\\"DONE\\"}"}'),
+        ],
+        n,
+    )
+    assert final_result.bridge_mode == "answer"
+    assert final_result.answer == "DONE"
+    assert final_result.tool_calls == []
+    assert final_result.aborted is True
+
+
+def test_native_tool_first_custom_and_tool_search_boundaries_are_parsed():
+    from app import upstream
+    from app.models import NormalizedRequest
+    from app.sse import SSEEvent
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="x", want_stream=False, client_api="responses", is_primary_path=True)
+
+    custom_result = upstream.collect_bill015_result_from_events(
+        [
+            SSEEvent("response.output_item.added", '{"type":"response.output_item.added","item":{"type":"custom_tool_call","id":"ct_1","call_id":"call_patch","name":"apply_patch"}}'),
+            SSEEvent("response.custom_tool_call_input.done", '{"type":"response.custom_tool_call_input.done","item_id":"ct_1","input":"*** Begin Patch\\n*** End Patch"}'),
+        ],
+        n,
+    )
+    assert custom_result.bridge_mode == "tool_call"
+    assert custom_result.tool_calls[0].call_type == "custom"
+    assert custom_result.tool_calls[0].name == "apply_patch"
+    assert custom_result.tool_calls[0].arguments == "*** Begin Patch\n*** End Patch"
+
+    search_result = upstream.collect_bill015_result_from_events(
+        [
+            SSEEvent("response.output_item.done", '{"type":"response.output_item.done","item":{"type":"tool_search_call","id":"ts_1","call_id":"call_search","execution":"client","arguments":{"query":"browser tools","limit":8}}}'),
+        ],
+        n,
+    )
+    assert search_result.bridge_mode == "tool_call"
+    assert search_result.tool_calls[0].call_type == "tool_search"
+    assert search_result.tool_calls[0].name == "tool_search"
+    assert '"query": "browser tools"' in search_result.tool_calls[0].arguments

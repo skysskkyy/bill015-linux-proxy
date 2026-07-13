@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from .audit import redact
 from .config import Settings, settings
-from .models import Bill015Result, NormalizedRequest, local_response_id
+from .models import Bill015Result, BridgeToolCall, NormalizedRequest, local_response_id
 from .payloads import build_bill015_payload
 from .sse import SSEEvent, parse_async_sse_lines
 from .tool_bridge import parse_function_arguments
@@ -95,6 +95,128 @@ def _normalize_tool_arguments(value: str) -> str:
         return " ".join(text.split())
 
 
+def _event_item_key(obj: dict[str, Any], item: dict[str, Any] | None = None) -> str:
+    item = item or {}
+    return str(
+        obj.get("item_id")
+        or obj.get("call_id")
+        or item.get("id")
+        or item.get("call_id")
+        or "__active__"
+    )
+
+
+def _remember_stream_tool(active_tools: dict[str, dict[str, Any]], obj: dict[str, Any]) -> dict[str, Any]:
+    item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+    key = _event_item_key(obj, item)
+    current = dict(active_tools.get(key) or active_tools.get("__active__") or {})
+    tool_type = item.get("type") or current.get("type")
+    current.update({
+        "item_id": item.get("id") or obj.get("item_id") or current.get("item_id"),
+        "call_id": item.get("call_id") or obj.get("call_id") or current.get("call_id"),
+        "name": item.get("name") or obj.get("name") or current.get("name") or _name_from_tool_type(str(tool_type or "")),
+        "namespace": item.get("namespace") or obj.get("namespace") or current.get("namespace"),
+        "type": tool_type,
+    })
+    active_tools[key] = current
+    active_tools["__active__"] = current
+    return current
+
+
+def _active_stream_tool(active_tools: dict[str, dict[str, Any]], obj: dict[str, Any]) -> dict[str, Any]:
+    key = _event_item_key(obj)
+    current = dict(active_tools.get(key) or active_tools.get("__active__") or {})
+    if obj.get("call_id") and not current.get("call_id"):
+        current["call_id"] = obj.get("call_id")
+    if obj.get("name") and not current.get("name"):
+        current["name"] = obj.get("name")
+    if obj.get("namespace") and not current.get("namespace"):
+        current["namespace"] = obj.get("namespace")
+    if current:
+        active_tools[key] = current
+        active_tools["__active__"] = current
+    return current
+
+
+def _json_object_from_text(text: str) -> tuple[dict[str, Any], bool]:
+    try:
+        obj = json.loads(text or "{}")
+        return (obj if isinstance(obj, dict) else {}, False)
+    except Exception:
+        return {}, True
+
+
+def _looks_like_emit_value_arguments(text: str, cfg: Settings) -> bool:
+    obj, malformed = _json_object_from_text(text)
+    if malformed:
+        return False
+    return "mode" in obj and cfg.answer_field in obj and "tool_calls" in obj
+
+
+def _stringify_arguments(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return "{}"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _name_from_tool_type(tool_type: str) -> str:
+    if tool_type == "tool_search_call":
+        return "tool_search"
+    if tool_type == "web_search_call":
+        return "web_search"
+    if tool_type == "computer_call":
+        return "computer"
+    return ""
+
+
+def _direct_call_type(tool: dict[str, Any], name: str) -> str:
+    typ = str(tool.get("type") or "")
+    if typ == "custom_tool_call":
+        return "custom"
+    if typ == "tool_search_call" or name == "tool_search":
+        return "tool_search"
+    if typ == "web_search_call" or name == "web_search":
+        return "web_search"
+    return "function"
+
+
+def _apply_tool_arguments_result(
+    result: Bill015Result,
+    final_args: str,
+    tool: dict[str, Any],
+    n: NormalizedRequest,
+    cfg: Settings,
+) -> None:
+    name = str(tool.get("name") or _name_from_tool_type(str(tool.get("type") or "")) or "")
+    namespace = tool.get("namespace")
+    call_id = str(tool.get("call_id") or tool.get("item_id") or "") or ("call_" + local_response_id().removeprefix("resp_local_")[:18])
+    result.raw_arguments = final_args
+    result.args_done_seen = True
+    if name == cfg.function_name or (not name and _looks_like_emit_value_arguments(final_args, cfg)):
+        result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry)
+        return
+    if name == cfg.final_answer_tool_name:
+        obj, malformed = _json_object_from_text(final_args)
+        result.malformed_function_args = malformed
+        result.answer = str(obj.get(cfg.answer_field) or obj.get("answer") or final_args or "")
+        result.bridge_mode = "answer"
+        result.tool_calls = []
+        return
+    result.bridge_mode = "tool_call"
+    result.tool_calls = [
+        BridgeToolCall(
+            id=call_id,
+            name=name,
+            namespace=str(namespace) if namespace else None,
+            arguments=final_args if final_args else "{}",
+            call_type=_direct_call_type(tool, name),
+            requested_name=name,
+        )
+    ]
+
+
 def _args_done_deadline(cfg: Settings = settings) -> float | None:
     return time.perf_counter() + cfg.args_done_timeout_ms / 1000 if cfg.args_done_timeout_ms > 0 else None
 
@@ -130,7 +252,9 @@ def _is_retryable_pre_stream_failure(status_code: int | None, detail: Any = None
 def collect_bill015_result_from_events(events: Iterable[SSEEvent], n: NormalizedRequest, cfg: Settings = settings) -> Bill015Result:
     """Offline helper used by regression tests to validate event-state behavior."""
     result = Bill015Result(local_request_id=local_response_id())
-    args_buffer: list[str] = []
+    active_tools: dict[str, dict[str, Any]] = {}
+    args_buffers: dict[str, list[str]] = {}
+    custom_buffers: dict[str, list[str]] = {}
     answer_buffer: list[str] = []
     for ev in events:
         obj = ev.json
@@ -146,11 +270,22 @@ def collect_bill015_result_from_events(events: Iterable[SSEEvent], n: Normalized
             result.upstream_response_id = response.get("id") or obj.get("response_id") or obj.get("id")
         elif typ == "response.output_item.added":
             item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
-            result.function_call_seen = item.get("name") == cfg.function_name or cfg.function_name in json.dumps(obj, ensure_ascii=False)
+            _remember_stream_tool(active_tools, obj)
+            result.function_call_seen = item.get("type") in {"function_call", "custom_tool_call", "tool_search_call", "web_search_call", "computer_call", "tool_call"} or item.get("name") == cfg.function_name or cfg.function_name in json.dumps(obj, ensure_ascii=False)
         elif typ == "response.function_call_arguments.delta":
             delta = obj.get("delta")
             if isinstance(delta, str):
-                args_buffer.append(delta)
+                key = _event_item_key(obj)
+                args_buffers.setdefault(key, []).append(delta)
+                if key != "__active__":
+                    args_buffers.setdefault("__active__", []).append(delta)
+        elif typ == "response.custom_tool_call_input.delta":
+            delta = obj.get("delta")
+            if isinstance(delta, str):
+                key = _event_item_key(obj)
+                custom_buffers.setdefault(key, []).append(delta)
+                if key != "__active__":
+                    custom_buffers.setdefault("__active__", []).append(delta)
         elif typ == "response.output_text.delta":
             delta = obj.get("delta")
             if isinstance(delta, str):
@@ -160,13 +295,32 @@ def collect_bill015_result_from_events(events: Iterable[SSEEvent], n: Normalized
             if isinstance(text, str):
                 result.answer = text
         elif typ == "response.function_call_arguments.done":
-            final_args = obj.get("arguments") if isinstance(obj.get("arguments"), str) else "".join(args_buffer)
-            result.raw_arguments = final_args
-            result.args_done_seen = True
-            result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry)
+            tool = _active_stream_tool(active_tools, obj)
+            key = _event_item_key(obj)
+            final_args = obj.get("arguments") if isinstance(obj.get("arguments"), str) else "".join(args_buffers.get(key) or args_buffers.get("__active__") or [])
+            _apply_tool_arguments_result(result, final_args, tool, n, cfg)
             apply_tool_loop_guard(result, n)
             result.aborted = True
             break
+        elif typ == "response.custom_tool_call_input.done":
+            tool = _active_stream_tool(active_tools, obj)
+            key = _event_item_key(obj)
+            final_input = obj.get("input") if isinstance(obj.get("input"), str) else "".join(custom_buffers.get(key) or custom_buffers.get("__active__") or [])
+            tool["type"] = tool.get("type") or "custom_tool_call"
+            _apply_tool_arguments_result(result, final_input, tool, n, cfg)
+            apply_tool_loop_guard(result, n)
+            result.aborted = True
+            break
+        elif typ == "response.output_item.done":
+            item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+            item_type = str(item.get("type") or "")
+            if item_type in {"tool_search_call", "web_search_call", "computer_call"}:
+                tool = _remember_stream_tool(active_tools, obj)
+                final_args = _stringify_arguments(item.get("arguments") or item.get("action") or {})
+                _apply_tool_arguments_result(result, final_args, tool, n, cfg)
+                apply_tool_loop_guard(result, n)
+                result.aborted = True
+                break
         elif typ == "response.completed":
             result.upstream_completed_seen = True
             if not result.answer and answer_buffer:
@@ -194,7 +348,7 @@ def audit_from_result(result: Bill015Result, n: NormalizedRequest, mode: str, fa
         "function_call_seen": result.function_call_seen,
         "args_done_seen": result.args_done_seen,
         "upstream_completed_seen": result.upstream_completed_seen,
-        "aborted_at": "response.function_call_arguments.done" if result.aborted else None,
+        "aborted_at": "tool_arguments_boundary" if result.aborted else None,
         "answer_chars": len(result.answer),
         "bridge_mode": result.bridge_mode,
         "tool_calls": [{"id": c.id, "name": c.name, "namespace": c.namespace, "requested_name": c.requested_name, "type": c.call_type, "arguments_chars": len(c.arguments)} for c in result.tool_calls],
@@ -270,7 +424,9 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
         raise HTTPException(status_code=500, detail=f"Missing upstream API key env {cfg.upstream_api_key_env}")
 
     payload = build_bill015_payload(n, cfg)
-    args_buffer: list[str] = []
+    active_tools: dict[str, dict[str, Any]] = {}
+    args_buffers: dict[str, list[str]] = {}
+    custom_buffers: dict[str, list[str]] = {}
     answer_buffer: list[str] = []
     args_done_deadline = _args_done_deadline(cfg)
     headers = upstream_auth_headers(stream=True, cfg=cfg)
@@ -278,7 +434,9 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
         max_retries = 0 if cfg.strict_zero else max(0, int(getattr(cfg, "upstream_retries", 0)))
         async with httpx.AsyncClient(timeout=http_timeout(cfg)) as client:
             for attempt in range(max_retries + 1):
-                args_buffer = []
+                active_tools = {}
+                args_buffers = {}
+                custom_buffers = {}
                 answer_buffer = []
                 args_done_deadline = _args_done_deadline(cfg)
                 attempt_event_len = len(result.event_sequence)
@@ -314,14 +472,25 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                                 result.upstream_response_id = response.get("id") or obj.get("response_id") or obj.get("id")
                             elif typ == "response.output_item.added":
                                 item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
-                                if item.get("type") in {"function_call", "tool_call"} or item.get("name") == cfg.function_name:
+                                _remember_stream_tool(active_tools, obj)
+                                if item.get("type") in {"function_call", "custom_tool_call", "tool_search_call", "web_search_call", "computer_call", "tool_call"} or item.get("name") == cfg.function_name:
                                     result.function_call_seen = True
                                 else:
                                     result.function_call_seen = result.function_call_seen or (cfg.function_name in json.dumps(obj, ensure_ascii=False))
                             elif typ == "response.function_call_arguments.delta":
                                 delta = obj.get("delta")
                                 if isinstance(delta, str):
-                                    args_buffer.append(delta)
+                                    key = _event_item_key(obj)
+                                    args_buffers.setdefault(key, []).append(delta)
+                                    if key != "__active__":
+                                        args_buffers.setdefault("__active__", []).append(delta)
+                            elif typ == "response.custom_tool_call_input.delta":
+                                delta = obj.get("delta")
+                                if isinstance(delta, str):
+                                    key = _event_item_key(obj)
+                                    custom_buffers.setdefault(key, []).append(delta)
+                                    if key != "__active__":
+                                        custom_buffers.setdefault("__active__", []).append(delta)
                             elif typ == "response.output_text.delta":
                                 delta = obj.get("delta")
                                 if isinstance(delta, str):
@@ -331,14 +500,35 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                                 if isinstance(text, str):
                                     result.answer = text
                             elif typ == "response.function_call_arguments.done":
-                                final_args = obj.get("arguments") if isinstance(obj.get("arguments"), str) else "".join(args_buffer)
-                                result.raw_arguments = final_args
-                                result.args_done_seen = True
-                                result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry)
+                                tool = _active_stream_tool(active_tools, obj)
+                                key = _event_item_key(obj)
+                                final_args = obj.get("arguments") if isinstance(obj.get("arguments"), str) else "".join(args_buffers.get(key) or args_buffers.get("__active__") or [])
+                                _apply_tool_arguments_result(result, final_args, tool, n, cfg)
                                 apply_tool_loop_guard(result, n)
                                 await resp.aclose()
                                 result.aborted = True
                                 break
+                            elif typ == "response.custom_tool_call_input.done":
+                                tool = _active_stream_tool(active_tools, obj)
+                                key = _event_item_key(obj)
+                                final_input = obj.get("input") if isinstance(obj.get("input"), str) else "".join(custom_buffers.get(key) or custom_buffers.get("__active__") or [])
+                                tool["type"] = tool.get("type") or "custom_tool_call"
+                                _apply_tool_arguments_result(result, final_input, tool, n, cfg)
+                                apply_tool_loop_guard(result, n)
+                                await resp.aclose()
+                                result.aborted = True
+                                break
+                            elif typ == "response.output_item.done":
+                                item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+                                item_type = str(item.get("type") or "")
+                                if item_type in {"tool_search_call", "web_search_call", "computer_call"}:
+                                    tool = _remember_stream_tool(active_tools, obj)
+                                    final_args = _stringify_arguments(item.get("arguments") or item.get("action") or {})
+                                    _apply_tool_arguments_result(result, final_args, tool, n, cfg)
+                                    apply_tool_loop_guard(result, n)
+                                    await resp.aclose()
+                                    result.aborted = True
+                                    break
                             elif typ == "response.completed":
                                 result.upstream_completed_seen = True
                                 if not result.answer and answer_buffer:
