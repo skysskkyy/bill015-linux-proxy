@@ -9,6 +9,16 @@ from .tool_bridge import build_client_tool_catalog
 from .tool_history import parse_tool_history, render_tool_feedback_for_model
 from .usage_estimator import estimate_chat_usage_from_body, estimate_responses_usage_from_body, estimate_text_tokens
 
+UNSUPPORTED_IMAGE_NOTICE = (
+    "[local proxy notice: omitted unsupported image input. This local proxy does not support "
+    "image/screenshot uploads; no visual content was sent upstream. Do not infer details from "
+    "the image. Use the available text/tool context, or ask the user for a text description.]"
+)
+
+
+IMAGE_CONTENT_TYPES = {"input_image", "image", "image_url", "computer_screenshot"}
+IMAGE_FIELD_NAMES = {"image_url", "image", "image_data", "screenshot", "screenshot_url"}
+
 
 def model_identity_instruction(model: str) -> str:
     # Keep identity aligned with the actual upstream model after alias mapping.
@@ -404,6 +414,82 @@ def request_needs_passthrough(body: dict[str, Any]) -> tuple[bool, str | None]:
     # Explicit tool_choice is also handled by the bridge. Only media/file payloads
     # need native passthrough at this stage.
     return False, None
+
+
+def sanitize_unsupported_image_inputs(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Replace image/screenshot payloads with a textual local-proxy notice.
+
+    The BILL-015 bridge cannot safely early-abort native multimodal/image
+    passthrough.  Previously strict-zero mode rejected such requests with a 422,
+    while non-strict mode could accidentally forward billable images upstream.
+    Instead, strip visual bytes/URLs from user-visible input fields and tell the
+    upstream text model exactly what happened.
+    """
+
+    replacements = 0
+
+    def is_image_node(value: Any) -> bool:
+        if not isinstance(value, dict):
+            return False
+        typ = str(value.get("type") or "").lower()
+        if typ in IMAGE_CONTENT_TYPES:
+            return True
+        mime = str(value.get("mime_type") or value.get("media_type") or value.get("content_type") or "").lower()
+        if mime.startswith("image/"):
+            return True
+        for key in ("file_data", "data", "url", "source"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip().lower().startswith("data:image/"):
+                return True
+        return any(k in value for k in IMAGE_FIELD_NAMES)
+
+    def notice_part(kind: str | None = None) -> dict[str, str]:
+        suffix = f" ({kind})" if kind else ""
+        return {
+            "type": "input_text",
+            "text": UNSUPPORTED_IMAGE_NOTICE.replace("omitted unsupported image input", f"omitted unsupported image input{suffix}"),
+        }
+
+    def sanitize_value(value: Any, *, top_level_input_item: bool = False, list_items_are_top_level: bool = False) -> Any:
+        nonlocal replacements
+        if isinstance(value, dict):
+            if is_image_node(value):
+                replacements += 1
+                typ = str(value.get("type") or "image").lower()
+                part = notice_part(typ)
+                if top_level_input_item:
+                    return {"role": "user", "content": [part]}
+                return part
+            out: dict[str, Any] = {}
+            for k, v in value.items():
+                # Only recurse inside request payload fields. Tool schemas may
+                # mention image_url/mime_type as parameter names; do not rewrite
+                # the schema, only actual input/message content.
+                if k in {"input", "messages"}:
+                    out[k] = sanitize_sequence(v, top_level_items=True) if isinstance(v, list) else sanitize_value(v)
+                elif k in {"content", "output"}:
+                    out[k] = sanitize_sequence(v, top_level_items=False) if isinstance(v, list) else sanitize_value(v)
+                else:
+                    out[k] = v
+            return out
+        if isinstance(value, list):
+            return sanitize_sequence(value, top_level_items=list_items_are_top_level)
+        return value
+
+    def sanitize_sequence(seq: list[Any], *, top_level_items: bool = False) -> list[Any]:
+        out: list[Any] = []
+        for item in seq:
+            out.append(sanitize_value(item, top_level_input_item=top_level_items and is_image_node(item)))
+        return out
+
+    sanitized = dict(body)
+    if "input" in sanitized:
+        value = sanitized.get("input")
+        sanitized["input"] = sanitize_sequence(value, top_level_items=True) if isinstance(value, list) else sanitize_value(value)
+    if "messages" in sanitized:
+        value = sanitized.get("messages")
+        sanitized["messages"] = sanitize_sequence(value, top_level_items=True) if isinstance(value, list) else sanitize_value(value)
+    return sanitized, replacements
 
 def collect_deferred_tools_from_input(value: Any) -> list[dict[str, Any]]:
     """Return tools exposed by native tool_search_output items.

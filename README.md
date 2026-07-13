@@ -17,6 +17,7 @@
 - `0.3.6` 起：默认提升输出/等待预算：普通输出 8192、compaction 输出 8192、answer 缓冲 65536、上游总等待 300s、args_done 300s、idle 180s，默认不重试。
 - `0.3.7` 引入 `native_tool_first` 实验策略：把 Codex 原生工具直接暴露给上游；最终回答走 `submit_final_answer` 工具。
 - `0.3.8` 起：因 `native_tool_first` 实测会出现上游用量记录，默认和 `strict_zero=true` 下都恢复/强制 `emit_value` 早断开策略；`native_tool_first` 仅在 `strict_zero=false` 时作为实验选项。
+- `0.3.9` 起：图片/截图输入会先被本地代理替换成“本地不支持图片输入”的文字提示再送上游，不再 strict-zero 422 或转发图片；上游未返回 `response.function_call_arguments.done` 时也会安全收尾，避免客户端断流报错。
 - 本阶段不做 Codex 配置接入
 
 ## 本地配置

@@ -22,6 +22,7 @@ from .normalization import (
     normalize_responses_request,
     parse_codex_turn_metadata,
     request_needs_passthrough,
+    sanitize_unsupported_image_inputs,
 )
 from .payloads import (
     build_bill015_payload,
@@ -57,6 +58,7 @@ __all__ = [
     'native_input_transcript',
     'last_user_instruction',
     'request_needs_passthrough',
+    'sanitize_unsupported_image_inputs',
     'collect_deferred_tools_from_input',
     'combine_tool_catalogs',
     'normalize_responses_request',

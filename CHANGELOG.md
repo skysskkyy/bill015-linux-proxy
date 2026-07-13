@@ -2,6 +2,16 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.3.9] - 2026-07-13
+
+### Fixed
+- Replaced image/screenshot inputs with an upstream-visible local-proxy notice instead of returning strict-zero `422` or forwarding billable image payloads.
+- Sanitized image data URLs, image MIME parts, and `image_url`/screenshot fields before normalization and upstream payload construction.
+- Completed client streams safely when upstream closes without `response.function_call_arguments.done`, extracting completed message text when present and otherwise returning a local retry note instead of disconnecting.
+
+### Tests
+- Added regressions for image sanitization and no-arguments upstream stream completion.
+
 ## [0.3.8] - 2026-07-13
 
 ### Fixed

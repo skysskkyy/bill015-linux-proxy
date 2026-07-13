@@ -161,6 +161,75 @@ def _stringify_arguments(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+SAFE_EMPTY_UPSTREAM_ANSWER = (
+    "[local proxy] Upstream ended without tool-call arguments or assistant text; "
+    "the proxy safely completed this stream instead of disconnecting. Please retry the last request."
+)
+
+
+def _extract_text_parts(value: Any) -> list[str]:
+    parts: list[str] = []
+    if isinstance(value, str):
+        if value:
+            parts.append(value)
+        return parts
+    if isinstance(value, list):
+        for item in value:
+            parts.extend(_extract_text_parts(item))
+        return parts
+    if isinstance(value, dict):
+        # Responses message content normally uses {"type":"output_text","text":"..."}.
+        for key in ("text", "output_text", "content", "summary"):
+            v = value.get(key)
+            if isinstance(v, str) and v:
+                parts.append(v)
+            elif isinstance(v, (list, dict)):
+                parts.extend(_extract_text_parts(v))
+                break
+        return parts
+    return parts
+
+
+def _extract_message_text_from_item(item: dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return ""
+    item_type = str(item.get("type") or "")
+    if item_type and item_type not in {"message", "output_text", "text"}:
+        return ""
+    return "\n".join(part for part in _extract_text_parts(item.get("content", item.get("text", ""))) if part)
+
+
+def _extract_response_text(obj: dict[str, Any]) -> str:
+    response = obj.get("response") if isinstance(obj.get("response"), dict) else obj
+    if not isinstance(response, dict):
+        return ""
+    output = response.get("output")
+    if not isinstance(output, list):
+        return ""
+    parts: list[str] = []
+    for item in output:
+        if isinstance(item, dict):
+            text = _extract_message_text_from_item(item)
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def _finalize_result_without_args_done(result: Bill015Result, answer_buffer: list[str]) -> None:
+    """Avoid surfacing a hard stream-disconnect error for empty upstream closes."""
+    if result.args_done_seen or result.error:
+        return
+    if not result.answer and answer_buffer:
+        result.answer = "".join(answer_buffer)
+    result.bridge_mode = "answer"
+    if result.answer:
+        result.retry_reasons.append("upstream_completed_without_args_done_used_text")
+        return
+    result.answer = SAFE_EMPTY_UPSTREAM_ANSWER
+    result.upstream_completed_seen = True
+    result.retry_reasons.append("upstream_completed_without_args_done_synthesized_safe_answer")
+
+
 def _name_from_tool_type(tool_type: str) -> str:
     if tool_type == "tool_search_call":
         return "tool_search"
@@ -321,19 +390,28 @@ def collect_bill015_result_from_events(events: Iterable[SSEEvent], n: Normalized
                 apply_tool_loop_guard(result, n)
                 result.aborted = True
                 break
+            if item_type == "message":
+                text = _extract_message_text_from_item(item)
+                if text:
+                    result.answer = text
         elif typ == "response.completed":
             result.upstream_completed_seen = True
             if not result.answer and answer_buffer:
                 result.answer = "".join(answer_buffer)
+            if not result.answer:
+                result.answer = _extract_response_text(obj)
             break
         elif typ == "response.incomplete":
             result.error = "upstream response incomplete"
             if not result.answer and answer_buffer:
                 result.answer = "".join(answer_buffer)
+            if not result.answer:
+                result.answer = _extract_response_text(obj)
             break
         elif typ in {"response.failed", "error"}:
             result.error = json.dumps(obj, ensure_ascii=False)[:2000]
             break
+    _finalize_result_without_args_done(result, answer_buffer)
     return result
 
 def audit_from_result(result: Bill015Result, n: NormalizedRequest, mode: str, fallback_used: bool = False) -> dict[str, Any]:
@@ -529,15 +607,23 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                                     await resp.aclose()
                                     result.aborted = True
                                     break
+                                if item_type == "message":
+                                    text = _extract_message_text_from_item(item)
+                                    if text:
+                                        result.answer = text
                             elif typ == "response.completed":
                                 result.upstream_completed_seen = True
                                 if not result.answer and answer_buffer:
                                     result.answer = "".join(answer_buffer)
+                                if not result.answer:
+                                    result.answer = _extract_response_text(obj)
                                 break
                             elif typ == "response.incomplete":
                                 result.error = "upstream response incomplete"
                                 if not result.answer and answer_buffer:
                                     result.answer = "".join(answer_buffer)
+                                if not result.answer:
+                                    result.answer = _extract_response_text(obj)
                                 break
                             elif typ in {"response.failed", "error"}:
                                 raise RuntimeError(json.dumps(obj, ensure_ascii=False)[:2000])
@@ -558,10 +644,7 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
             await asyncio.sleep(0.5)
             result.verify_post = await fetch_user_self(cfg)
             result.verify_delta = compute_delta(result.verify_pre, result.verify_post)
-        if not result.args_done_seen and result.answer:
-            result.bridge_mode = "answer"
-        if not result.args_done_seen and not result.answer:
-            raise RuntimeError("upstream stream ended before response.function_call_arguments.done")
+        _finalize_result_without_args_done(result, answer_buffer)
         return result
     except HTTPException:
         raise

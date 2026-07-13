@@ -14,7 +14,7 @@ from .audit import audit_logger
 from .chat_events import chat_json, chat_sse_generator
 from .config import settings
 from .models import Bill015Result, NormalizedRequest, local_response_id
-from .normalization import normalize_chat_request, normalize_responses_request, request_needs_passthrough
+from .normalization import normalize_chat_request, normalize_responses_request, request_needs_passthrough, sanitize_unsupported_image_inputs
 from .response_events import response_json, responses_sse_generator
 from .state import runtime_state
 from .upstream import audit_from_result, dry_run_response, execute_bill015
@@ -191,6 +191,7 @@ def _force_compaction_metadata(body: dict[str, Any]) -> dict[str, Any]:
 
 
 async def handle_responses_body(body: dict[str, Any]):
+    body, image_replacements = sanitize_unsupported_image_inputs(body)
     n = normalize_responses_request(body)
     mode = active_mode()
     if mode == "circuit-open":
@@ -220,6 +221,7 @@ async def handle_responses_body(body: dict[str, Any]):
                 "model": n.model,
                 "strict_zero": settings.strict_zero,
                 "reason": passthrough_reason,
+                "image_replacements": image_replacements,
                 "prompt_chars": len(n.user_input),
             })
             raise HTTPException(
@@ -238,6 +240,7 @@ async def handle_responses_body(body: dict[str, Any]):
             "model": n.model,
             "strict_zero": settings.strict_zero,
             "reason": passthrough_reason,
+            "image_replacements": image_replacements,
             "prompt_chars": len(n.user_input),
         })
         if n.want_stream:
@@ -279,6 +282,7 @@ async def handle_responses_compact_body(body: dict[str, Any]):
     stream. Keep the BILL-015 bridge path for strict_zero/low-usage semantics,
     but wrap the produced handoff summary in the same ResponseItem shape.
     """
+    body, _image_replacements = sanitize_unsupported_image_inputs(body)
     compact_body = _force_compaction_metadata(body)
     compact_body["stream"] = False
     n = normalize_responses_request(compact_body)
@@ -328,7 +332,7 @@ async def responses_compact(request: Request):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    body = await read_json_body(request)
+    body, _image_replacements = sanitize_unsupported_image_inputs(await read_json_body(request))
     n = normalize_chat_request(body)
     mode = active_mode()
     if mode == "circuit-open":

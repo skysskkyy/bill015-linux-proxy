@@ -798,16 +798,27 @@ def test_budgeted_transcript_uses_current_and_tail_history_not_raw_char_prefix()
     assert "OLD_HISTORY_START" not in content
 
 
-def test_strict_zero_blocks_auto_passthrough(monkeypatch):
+def test_image_inputs_are_sanitized_instead_of_strict_zero_422(monkeypatch):
     from fastapi.testclient import TestClient
 
+    import app.main as main
     from app.config import settings
     from app.main import app
+    from app.models import Bill015Result
     from app.state import runtime_state
 
     monkeypatch.setattr(settings, "mode", "exploit")
     monkeypatch.setattr(settings, "strict_zero", True)
     runtime_state.current_mode_override = None
+
+    async def fake_execute(n, mode, local_request_id=None):
+        dumped = json.dumps(n.raw_input, ensure_ascii=False)
+        assert "data:image" not in dumped
+        assert "image_url" not in dumped
+        assert "does not support image/screenshot uploads" in dumped
+        return Bill015Result(local_request_id=local_request_id or "resp_local_test", answer="OK", args_done_seen=True, aborted=True)
+
+    monkeypatch.setattr(main, "execute_bill015", fake_execute)
 
     client = TestClient(app)
     response = client.post(
@@ -819,8 +830,8 @@ def test_strict_zero_blocks_auto_passthrough(monkeypatch):
         },
     )
 
-    assert response.status_code == 422
-    assert "strict_zero blocked auto-passthrough" in response.text
+    assert response.status_code == 200
+    assert response.json()["output"][0]["content"][0]["text"] == "OK"
 
 
 def test_config_schema_reports_unknown_fields():
@@ -1142,3 +1153,41 @@ def test_native_tool_first_custom_and_tool_search_boundaries_are_parsed():
     assert search_result.tool_calls[0].call_type == "tool_search"
     assert search_result.tool_calls[0].name == "tool_search"
     assert '"query": "browser tools"' in search_result.tool_calls[0].arguments
+
+
+def test_upstream_completed_without_args_done_uses_completed_text():
+    from app import upstream
+    from app.models import NormalizedRequest
+    from app.sse import SSEEvent
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="x", want_stream=False, client_api="responses", is_primary_path=True)
+
+    result = upstream.collect_bill015_result_from_events(
+        [
+            SSEEvent(
+                "response.completed",
+                '{"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"DONE"}]}]}}',
+            ),
+        ],
+        n,
+    )
+
+    assert result.answer == "DONE"
+    assert result.bridge_mode == "answer"
+    assert result.args_done_seen is False
+    assert "upstream_completed_without_args_done_used_text" in result.retry_reasons
+
+
+def test_upstream_empty_close_without_args_done_synthesizes_safe_answer():
+    from app import upstream
+    from app.models import NormalizedRequest
+    from app.sse import SSEEvent
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="x", want_stream=False, client_api="responses", is_primary_path=True)
+
+    result = upstream.collect_bill015_result_from_events([SSEEvent("message", "[DONE]")], n)
+
+    assert "safely completed this stream" in result.answer
+    assert result.bridge_mode == "answer"
+    assert result.args_done_seen is False
+    assert "upstream_completed_without_args_done_synthesized_safe_answer" in result.retry_reasons
