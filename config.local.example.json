@@ -24,7 +24,7 @@
     "force_default": false
   },
   "bill015": {
-    "bridge_strategy": "native_tool_first",
+    "bridge_strategy": "emit_value",
     "function_name": "emit_value",
     "final_answer_tool_name": "submit_final_answer",
     "native_tool_choice": "required",

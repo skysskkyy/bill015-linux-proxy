@@ -52,14 +52,7 @@ def main() -> None:
     r = client.post("/v1/responses", json=body)
     assert_true(r.status_code == 200, "/v1/responses dry-run non-stream failed")
     data = r.json()
-    dry_payload = data["payload"]
-    dry_tool_names = [t.get("name") for t in dry_payload.get("tools", []) if isinstance(t, dict)]
-    assert_true(
-        data["mode"] == "dry-run"
-        and dry_payload.get("tool_choice") == "required"
-        and "submit_final_answer" in dry_tool_names,
-        "dry-run payload wrong",
-    )
+    assert_true(data["mode"] == "dry-run" and data["payload"]["tool_choice"]["name"] == "emit_value", "dry-run payload wrong")
     assert_true(data["usage_estimate"]["input_tokens"] > 0, "dry-run usage estimate missing")
     print("[ok] /v1/responses dry-run non-stream")
 
@@ -80,8 +73,7 @@ def main() -> None:
     n = normalize_responses_request({"model": "gpt-5.5", "input": [{"role": "user", "content": [{"type": "input_text", "text": "Hello"}]}], "stream": True})
     payload = build_bill015_payload(n)
     assert_true(payload["tools"][0]["strict"] is True, "strict schema missing")
-    assert_true(payload["tool_choice"] == "required", "native tool_choice missing")
-    assert_true(any(t.get("name") == "submit_final_answer" for t in payload["tools"]), "final-answer tool missing")
+    assert_true(payload["tool_choice"]["name"] == "emit_value", "tool_choice missing")
     model54_n = normalize_responses_request({"model": "gpt-5.4", "input": "model switch", "stream": True})
     model54_payload = build_bill015_payload(model54_n)
     assert_true(model54_n.model == "gpt-5.4" and model54_payload["model"] == "gpt-5.4" and "GPT-5.4" not in json.dumps(model54_payload), "model passthrough/identity mapping failed")

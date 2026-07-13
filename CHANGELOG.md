@@ -2,6 +2,13 @@
 
 All notable changes to this local proxy are tracked here.
 
+## [0.3.8] - 2026-07-13
+
+### Fixed
+- Restored `emit_value` as the default bridge strategy for strict-zero operation after native-tool-first was observed to create upstream usage records.
+- Added a fail-closed guard: when `bill015.strict_zero=true`, any configured `native_tool_first` strategy is downgraded to `emit_value`.
+- Kept `native_tool_first` available only as an explicit experimental mode when `strict_zero=false`.
+
 ## [0.3.7] - 2026-07-13
 
 ### Changed

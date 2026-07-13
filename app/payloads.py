@@ -377,9 +377,9 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         max_tokens = min(int(max_tokens), cfg.max_output_tokens)
     except Exception:
         max_tokens = cfg.max_output_tokens
-    if cfg.bridge_strategy == "emit_value":
-        return build_emit_value_payload(n, cfg, max_tokens)
-    return build_native_tool_first_payload(n, cfg, max_tokens)
+    if cfg.bridge_strategy == "native_tool_first" and not cfg.strict_zero:
+        return build_native_tool_first_payload(n, cfg, max_tokens)
+    return build_emit_value_payload(n, cfg, max_tokens)
 
 
 def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max_tokens: int | None = None) -> dict[str, Any]:

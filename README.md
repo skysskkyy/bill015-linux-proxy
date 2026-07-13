@@ -15,7 +15,8 @@
 - `0.3.4` 起：默认关闭未知工具 `tool_bridge.allow_unknown_tools=false`；未出现在当前 Codex 工具 registry 的工具会被丢弃，缺工具时先走 `tool_search` 暴露工具。
 - `0.3.5` 起：上下文按 token 预算和优先级组织，不再按大字符数硬截断；最新用户请求去重置顶，最近并行工具批次完整保留并做 head/tail 摘要。
 - `0.3.6` 起：默认提升输出/等待预算：普通输出 8192、compaction 输出 8192、answer 缓冲 65536、上游总等待 300s、args_done 300s、idle 180s，默认不重试。
-- `0.3.7` 起：默认 `bill015.bridge_strategy=native_tool_first`，把 Codex 原生工具直接暴露给上游；最终回答走 `submit_final_answer` 工具，仍在工具参数边界 early-abort。旧 `emit_value` 封装保留为 fallback。
+- `0.3.7` 引入 `native_tool_first` 实验策略：把 Codex 原生工具直接暴露给上游；最终回答走 `submit_final_answer` 工具。
+- `0.3.8` 起：因 `native_tool_first` 实测会出现上游用量记录，默认和 `strict_zero=true` 下都恢复/强制 `emit_value` 早断开策略；`native_tool_first` 仅在 `strict_zero=false` 时作为实验选项。
 - 本阶段不做 Codex 配置接入
 
 ## 本地配置
@@ -61,7 +62,7 @@ S:\hack\packyapi.com\bill015_local_proxy\config.local.example.json
   },
   "mode": "exploit",
   "bill015": {
-    "bridge_strategy": "native_tool_first",
+    "bridge_strategy": "emit_value",
     "final_answer_tool_name": "submit_final_answer",
     "strict_zero": true
   },
@@ -112,7 +113,7 @@ python -m ruff check app scripts tests
 
 ## 模式
 
-- `exploit`：强制上游产出工具调用；收到 function/custom/tool_search/computer 等工具参数边界后关闭上游，再本地重组 Responses 输出。默认直接暴露 Codex 原生工具，最终回答使用 `submit_final_answer` 工具。
+- `exploit`：默认强制上游调用 `emit_value`；收到 `response.function_call_arguments.done` 后立即关闭上游，再本地重组 Responses 输出。`native_tool_first` 实验模式可处理 function/custom/tool_search/computer 等工具参数边界，但不用于 strict-zero。
 - `dry-run`：不请求上游，返回将要构造的脱敏请求摘要。
 - `normal`：普通转发 `/v1/responses` 到上游，不主动 abort。`bill015.strict_zero=true` 时会被拒绝。
 - `verify`：同 exploit，并在配置 `upstream.cookie` 后尝试记录 `/api/user/self` pre/post delta。
@@ -169,19 +170,19 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 
 ```json
 "bill015": {
-  "bridge_strategy": "native_tool_first",
+  "bridge_strategy": "emit_value",
   "final_answer_tool_name": "submit_final_answer",
   "native_tool_choice": "required",
   "native_parallel_tool_calls": false
 }
 ```
 
-效果：
+默认效果：
 
-- 上游看到本轮 Codex 原生工具 schema，少一层 `emit_value.tool_calls` JSON 封装，工具选择和参数质量更接近原生 Codex。
-- 普通最终回答也必须调用 `submit_final_answer`，所以回答路径同样可以在 `response.function_call_arguments.done` 后截断。
-- `tool_search_output` 暴露的 deferred tools 会在后续请求中补进上游工具列表。
-- 如需回退旧协议，可把 `bill015.bridge_strategy` 改成 `"emit_value"`。
+- 上游只看到一个强制 `emit_value` function tool；代理在 `response.function_call_arguments.done` 立刻断开。
+- `emit_value.tool_calls` 仍会按本轮 Codex 工具 registry 生成强类型 schema，避免完全靠自然语言描述工具。
+- `bill015.strict_zero=true` 时，即使配置了 `"native_tool_first"`，运行时也会 fail-closed 回落到 `"emit_value"`。
+- 如需实验更原生的工具选择，可同时设置 `"bridge_strategy": "native_tool_first"` 和 `"strict_zero": false`；注意这可能产生上游用量记录。
 
 默认配置：
 
@@ -195,7 +196,7 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 
 - 上游模型只能请求当前 Codex 请求里显式提供的工具，或 `tool_search` 暴露后的 deferred 工具。
 - 未注册工具不会被下发给本地 Codex，避免模型幻觉工具名造成乱调用。
-- 如果本轮没有任何工具 registry，默认仅暴露 `submit_final_answer`；旧 `emit_value` fallback 会限制为 `mode="answer"` 和 `tool_calls=[]`。
+- 如果本轮没有任何工具 registry，`emit_value` 会限制为 `mode="answer"` 和 `tool_calls=[]`。
 
 ## 上下文预算策略
 

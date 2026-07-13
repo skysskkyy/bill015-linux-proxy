@@ -309,6 +309,7 @@ def test_native_tool_first_payload_exposes_real_tools_and_final_answer(monkeypat
     from app.payloads import build_bill015_payload
 
     monkeypatch.setattr(settings, "bridge_strategy", "native_tool_first")
+    monkeypatch.setattr(settings, "strict_zero", False)
     monkeypatch.setattr(settings, "final_answer_tool_name", "submit_final_answer")
     monkeypatch.setattr(settings, "native_tool_choice", "required")
     tools = [
@@ -339,6 +340,38 @@ def test_native_tool_first_payload_exposes_real_tools_and_final_answer(monkeypat
     assert "emit_value" not in tool_names
     assert "submit_final_answer" in payload["instructions"]
     assert "Do not wrap native tool calls" in payload["instructions"]
+
+
+def test_strict_zero_forces_emit_value_even_if_native_tool_first_requested(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "bridge_strategy", "native_tool_first")
+    monkeypatch.setattr(settings, "strict_zero", True)
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.5",
+            "input": "Return OK.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+        }
+    )
+
+    payload = build_bill015_payload(n)
+
+    assert payload["tool_choice"] == {"type": "function", "name": "emit_value"}
+    assert [tool.get("name") for tool in payload["tools"]] == ["emit_value"]
 
 
 def test_local_proxy_noise_messages_are_not_replayed_to_upstream():

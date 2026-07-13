@@ -115,7 +115,7 @@ class Settings:
     default_model: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_MODEL", "model.default", "gpt-5.5"))
     model_aliases: Dict[str, str] = field(default_factory=lambda: _cfg_dict("model.aliases", {"codex-gpt55": "gpt-5.5", "codex-gpt54": "gpt-5.4"}))
     force_default_model: bool = field(default_factory=lambda: _env_bool("LOCAL_PROXY_FORCE_DEFAULT_MODEL", "model.force_default", False))
-    bridge_strategy: str = field(default_factory=lambda: _env_str("BILL015_BRIDGE_STRATEGY", "bill015.bridge_strategy", "native_tool_first"))
+    bridge_strategy: str = field(default_factory=lambda: _env_str("BILL015_BRIDGE_STRATEGY", "bill015.bridge_strategy", "emit_value"))
     function_name: str = field(default_factory=lambda: _env_str("BILL015_FUNCTION_NAME", "bill015.function_name", "emit_value"))
     final_answer_tool_name: str = field(default_factory=lambda: _env_str("BILL015_FINAL_ANSWER_TOOL_NAME", "bill015.final_answer_tool_name", "submit_final_answer"))
     native_tool_choice: str = field(default_factory=lambda: _env_str("BILL015_NATIVE_TOOL_CHOICE", "bill015.native_tool_choice", "required"))
@@ -200,5 +200,10 @@ class Settings:
 settings = Settings()
 settings.validate_mode()
 if settings.bridge_strategy not in {"native_tool_first", "emit_value"}:
-    settings.bridge_strategy = "native_tool_first"
+    settings.bridge_strategy = "emit_value"
+if settings.strict_zero and settings.bridge_strategy == "native_tool_first":
+    # Native-tool-first exposes real tools upstream and can let the provider
+    # account for prompt/output tokens before our local abort boundary.  In
+    # strict-zero mode fail closed back to the proven forced emit_value bridge.
+    settings.bridge_strategy = "emit_value"
 settings.config_warnings = CONFIG_WARNINGS
