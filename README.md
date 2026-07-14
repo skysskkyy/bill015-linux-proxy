@@ -18,6 +18,8 @@
 - `0.3.7` 引入 `native_tool_first` 实验策略：把 Codex 原生工具直接暴露给上游；最终回答走 `submit_final_answer` 工具。
 - `0.3.8` 起：因 `native_tool_first` 实测会出现上游用量记录，默认和 `strict_zero=true` 下都恢复/强制 `emit_value` 早断开策略；`native_tool_first` 仅在 `strict_zero=false` 时作为实验选项。
 - `0.3.9` 起：图片/截图输入会先被本地代理替换成“本地不支持图片输入”的文字提示再送上游，不再 strict-zero 422 或转发图片；上游未返回 `response.function_call_arguments.done` 时也会安全收尾，避免客户端断流报错。
+- `0.4.1` 起：支持多 API key 池；当上游错误字段为 `error.code="cyber_policy"` 且 `error.message` 为完整 cybersecurity-risk 提示时，等待 10 分钟后自动切换下一把 key 并继续原请求。
+- `0.4.2` 起：参考 Codex CLI 的上下文窗口机制，在 90% 阈值前预压缩；遇到 `context_length_exceeded` 时从最旧历史开始裁剪并重跑，同时保留最新用户请求和最新工具批次；reasoning-only 空流改为有限重试，不再伪装成成功回答。
 - 本阶段不做 Codex 配置接入
 
 ## 本地配置
@@ -73,6 +75,26 @@ S:\hack\packyapi.com\bill015_local_proxy\config.local.example.json
 }
 ```
 
+## API key 轮询
+
+保留 `upstream.api_key` 作为首选 key，并在 `upstream.api_keys` 中按顺序配置额外 key。代理会去重后形成进程级密钥池。
+
+当前轮询只针对日志中确认的上游 cyber policy 错误字段：SSE/JSON 错误对象中 `error.code="cyber_policy"`，且 `error.message` 等于完整的 `This content was flagged for possible cybersecurity risk... https://chatgpt.com/cyber` 提示。命中后，代理先等待 10 分钟，再切到下一把尚未在本次请求中尝试过的 key，并用原请求继续工作。其他 HTTP、网络或模型错误保持原有处理逻辑。
+
+该专用切换在 `bill015.strict_zero=true` 时仍生效；它不受通用 `upstream_retries` 开关控制。每个 key 在一次请求中最多尝试一次，全部耗尽后返回最后一个上游错误，不会无限循环。
+
+健康检查只暴露 key 数量、当前序号和不可逆短指纹，不返回完整 key；审计日志记录 `upstream_key_index`、`upstream_key_count` 和 `key_switch_count`。
+
+配置示例：
+
+```json
+{
+  "upstream": {
+    "api_key": "PRIMARY_KEY",
+    "api_keys": ["SECOND_KEY", "THIRD_KEY"]
+  }
+}
+```
 ## 启动
 
 无需设置环境变量，直接启动：
@@ -221,11 +243,12 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
   "max_answer_chars": 65536
 },
 "upstream": {
-  "timeout_seconds": 300
+  "timeout_seconds": 900
 },
 "limits": {
-  "args_done_timeout_ms": 300000,
-  "upstream_idle_timeout_ms": 180000,
+  "args_done_timeout_ms": 900000,
+  "upstream_idle_timeout_ms": 900000,
+  "stream_recovery_retries": 2,
   "upstream_retries": 0
 }
 ```
@@ -250,4 +273,6 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 "retry_reasons": ["http_500"]
 ```
 
-重试只发生在预流式失败阶段；如果已经收到模型输出、function-call 参数或其他 SSE 事件，则不会重试。注意：`bill015.strict_zero=true` 时会禁用重试。
+预流式 HTTP 5xx 重试仍由 `upstream_retries` 控制；`ReadTimeout` / `response.function_call_arguments.done`
+等待超时属于流式恢复路径，由 `stream_recovery_retries` 控制，会强化 final-action 指令并在需要时压缩历史后重新开流，避免把
+`stream disconnected before completion` 直接透给 Codex 客户端。

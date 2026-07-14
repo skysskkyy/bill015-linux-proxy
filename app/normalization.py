@@ -511,8 +511,45 @@ def collect_deferred_tools_from_input(value: Any) -> list[dict[str, Any]]:
             found.extend(t for t in tools if isinstance(t, dict))
     return found[-50:]
 
+
+def collect_additional_tools_from_input(value: Any) -> list[dict[str, Any]]:
+    """Return tools carried in Responses Lite ``additional_tools`` input items.
+
+    Newer Codex model metadata can set ``use_responses_lite``.  In that request
+    shape Codex moves the native tool list out of top-level ``tools`` and into a
+    developer input item:
+
+        {"type": "additional_tools", "role": "developer", "tools": [...]}
+
+    The local bridge still needs that list to build its emit_value catalog and
+    validation registry.  Without this extraction the proxy sees an empty tool
+    registry and strict mode truthfully tells the model that no local tools are
+    available, which is the observed gpt-5.6/CLI failure mode.
+    """
+    found: list[dict[str, Any]] = []
+    if not isinstance(value, list):
+        return found
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        typ = str(item.get("type") or "")
+        if typ not in {"additional_tools", "additionalTools"}:
+            continue
+        tools = item.get("tools")
+        if isinstance(tools, list):
+            found.extend(t for t in tools if isinstance(t, dict))
+    return found[-200:]
+
+
 def combine_tool_catalogs(primary_tools: Any, raw_input: Any) -> tuple[str, dict[str, dict[str, Any]]]:
-    catalog, registry = build_client_tool_catalog(primary_tools)
+    additional_tools = collect_additional_tools_from_input(raw_input)
+    merged_primary: Any = primary_tools
+    if additional_tools:
+        if isinstance(primary_tools, list):
+            merged_primary = [*primary_tools, *additional_tools]
+        else:
+            merged_primary = additional_tools
+    catalog, registry = build_client_tool_catalog(merged_primary)
     deferred = collect_deferred_tools_from_input(raw_input)
     if not deferred:
         return catalog, registry
@@ -525,6 +562,60 @@ def combine_tool_catalogs(primary_tools: Any, raw_input: Any) -> tuple[str, dict
             catalog = deferred_catalog
     return catalog, registry
 
+
+def detect_tool_bridge_target(body: dict[str, Any]) -> str:
+    """Best-effort client surface detection for local tool-call replay.
+
+    Desktop can consume native dynamic discovery items such as
+    ``tool_search_call`` and use their later ``tool_search_output`` to expose
+    deferred MCP/plugin tools.  The interactive CLI/TUI bridge currently
+    rejects those dynamic item types, so only apply the TUI restriction when the
+    request metadata explicitly identifies that surface.
+    """
+
+    haystack: list[str] = []
+    for key in ("client", "client_name", "surface", "source", "app", "origin"):
+        value = body.get(key)
+        if isinstance(value, str):
+            haystack.append(value)
+
+    for meta in (body.get("metadata"), body.get("client_metadata")):
+        if not isinstance(meta, dict):
+            continue
+        for key in ("x-codex-turn-metadata", "codex_client", "client", "client_name", "surface", "source", "app"):
+            value = meta.get(key)
+            if isinstance(value, str):
+                haystack.append(value)
+                try:
+                    parsed = json.loads(value)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    haystack.extend(str(v) for v in parsed.values() if isinstance(v, str))
+            elif isinstance(value, dict):
+                haystack.extend(str(v) for v in value.values() if isinstance(v, str))
+
+    text = " ".join(haystack).lower()
+    if any(token in text for token in ("tui", "codex-cli", "codex cli", "terminal", "console")):
+        return "tui"
+    return "desktop"
+
+
+def extract_reasoning_config(body: dict[str, Any]) -> dict[str, Any] | None:
+    """Return client-requested reasoning controls in upstream Responses shape.
+
+    Native Responses clients send ``reasoning={"effort": ...}``, while some
+    Chat/compat clients send top-level ``reasoning_effort``.  BILL-015 builds a
+    new upstream Responses payload, so normalize both forms here instead of
+    silently dropping top-level thinking-level controls.
+    """
+    reasoning = dict(body.get("reasoning") or {}) if isinstance(body.get("reasoning"), dict) else {}
+    if body.get("reasoning_effort") is not None and "effort" not in reasoning:
+        reasoning["effort"] = body.get("reasoning_effort")
+    if body.get("reasoning_summary") is not None and "summary" not in reasoning:
+        reasoning["summary"] = body.get("reasoning_summary")
+    return reasoning or None
+
 def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) -> NormalizedRequest:
     model = cfg.map_model(body.get("model"))
     raw_input = body.get("input", "")
@@ -532,6 +623,7 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
     tool_history = parse_tool_history(raw_input)
     latest_tool_summary = render_tool_feedback_for_model(tool_history)
     tools_catalog, tool_registry = combine_tool_catalogs(body.get("tools"), raw_input)
+    tool_bridge_target = detect_tool_bridge_target(body)
     request_kind, is_compaction = detect_request_kind(body)
     base_instructions = flatten_content(body.get("instructions", ""))
     context_budget = _context_token_budget(body, usage_estimate.input_tokens, cfg)
@@ -589,6 +681,7 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
         tools_summary=tools_catalog,
         tools_catalog=tools_catalog,
         tool_registry=tool_registry,
+        tool_bridge_target=tool_bridge_target,
         tool_history=tool_history,
         latest_tool_summary=latest_tool_summary,
         pending_tool_call_count=len(tool_history.pending_calls),
@@ -600,7 +693,7 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
         is_primary_path=True,
         temperature=body.get("temperature"),
         max_output_tokens=body.get("max_output_tokens") or body.get("max_tokens"),
-        reasoning=body.get("reasoning") if isinstance(body.get("reasoning"), dict) else None,
+        reasoning=extract_reasoning_config(body),
         metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else None,
         client_metadata=body.get("client_metadata") if isinstance(body.get("client_metadata"), dict) else None,
     )
@@ -608,6 +701,7 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
 def normalize_chat_request(body: dict[str, Any], cfg: Settings = settings) -> NormalizedRequest:
     instructions, user_input = flatten_chat_messages(body.get("messages", []))
     tools_catalog, tool_registry = build_client_tool_catalog(body.get("tools"))
+    tool_bridge_target = detect_tool_bridge_target(body)
     usage_estimate = estimate_chat_usage_from_body(body)
     current_user_request = ""
     messages = body.get("messages", [])
@@ -639,6 +733,7 @@ def normalize_chat_request(body: dict[str, Any], cfg: Settings = settings) -> No
         tools_summary=tools_catalog,
         tools_catalog=tools_catalog,
         tool_registry=tool_registry,
+        tool_bridge_target=tool_bridge_target,
         instructions=instructions,
         user_input=user_input,
         want_stream=bool(body.get("stream", False)),
@@ -646,6 +741,6 @@ def normalize_chat_request(body: dict[str, Any], cfg: Settings = settings) -> No
         is_primary_path=False,
         temperature=body.get("temperature"),
         max_output_tokens=body.get("max_tokens") or body.get("max_output_tokens"),
-        reasoning=body.get("reasoning") if isinstance(body.get("reasoning"), dict) else None,
+        reasoning=extract_reasoning_config(body),
         metadata=None,
     )

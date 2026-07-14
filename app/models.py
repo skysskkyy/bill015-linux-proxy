@@ -40,6 +40,7 @@ class NormalizedRequest:
     tools_summary: str = ""
     tools_catalog: str = ""
     tool_registry: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tool_bridge_target: str = "desktop"
     tool_history: Any = None
     latest_tool_summary: str = ""
     pending_tool_call_count: int = 0
@@ -73,6 +74,14 @@ class Bill015Result:
     duration_ms: int = 0
     retry_count: int = 0
     retry_reasons: list[str] = field(default_factory=list)
+    upstream_key_index: int | None = None
+    upstream_key_count: int = 0
+    key_switch_count: int = 0
+    compaction_count: int = 0
+    compacted_item_count: int = 0
+    clipped_tool_output_count: int = 0
+    empty_stream_retry_count: int = 0
+    stream_timeout_retry_count: int = 0
     event_sequence: list[str] = field(default_factory=list)
     error: str | None = None
     verify_pre: dict[str, Any] | None = None

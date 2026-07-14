@@ -10,14 +10,18 @@ from fastapi import HTTPException
 
 from .audit import redact
 from .config import Settings, settings
+from .context_compaction import compact_payload_history, context_threshold_tokens, payload_input_tokens, reinforce_final_action
+from .key_pool import ApiKeySelection, upstream_key_pool
 from .models import Bill015Result, BridgeToolCall, NormalizedRequest, local_response_id
 from .payloads import build_bill015_payload
 from .sse import SSEEvent, parse_async_sse_lines
 from .tool_bridge import parse_function_arguments
 from .tool_history import is_repeated_successful_call
 from .upstream_client import http_timeout, upstream_auth_headers
-from .upstream_errors import sanitize_upstream_error_detail
+from .upstream_errors import is_context_length_exceeded, key_rotation_error_reason, sanitize_upstream_error_detail
 from .usage_estimator import usage_estimate_dict
+
+KEY_ROTATION_DELAY_SECONDS = 10 * 60
 
 
 def apply_tool_loop_guard(result: Bill015Result, n: NormalizedRequest) -> None:
@@ -153,6 +157,18 @@ def _looks_like_emit_value_arguments(text: str, cfg: Settings) -> bool:
     return "mode" in obj and cfg.answer_field in obj and "tool_calls" in obj
 
 
+def _looks_like_emit_value_arguments_loose(text: str, cfg: Settings) -> bool:
+    if _looks_like_emit_value_arguments(text, cfg):
+        return True
+    # If the stream reached function_call_arguments.done but the JSON is
+    # truncated, the strict parser above cannot inspect keys.  Codex still has
+    # enough signal to classify this as the bridge finalizer rather than a
+    # direct native tool call when the top-level emit_value keys are present in
+    # the partial argument text.
+    value = str(text or "")
+    return '"mode"' in value and '"tool_calls"' in value
+
+
 def _stringify_arguments(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -161,10 +177,7 @@ def _stringify_arguments(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-SAFE_EMPTY_UPSTREAM_ANSWER = (
-    "[local proxy] Upstream ended without tool-call arguments or assistant text; "
-    "the proxy safely completed this stream instead of disconnecting. Please retry the last request."
-)
+EMPTY_UPSTREAM_ERROR = "upstream ended without a final answer or tool call"
 
 
 def _extract_text_parts(value: Any) -> list[str]:
@@ -225,9 +238,9 @@ def _finalize_result_without_args_done(result: Bill015Result, answer_buffer: lis
     if result.answer:
         result.retry_reasons.append("upstream_completed_without_args_done_used_text")
         return
-    result.answer = SAFE_EMPTY_UPSTREAM_ANSWER
+    result.error = EMPTY_UPSTREAM_ERROR
     result.upstream_completed_seen = True
-    result.retry_reasons.append("upstream_completed_without_args_done_synthesized_safe_answer")
+    result.retry_reasons.append("upstream_completed_without_args_done")
 
 
 def _name_from_tool_type(tool_type: str) -> str:
@@ -263,8 +276,9 @@ def _apply_tool_arguments_result(
     call_id = str(tool.get("call_id") or tool.get("item_id") or "") or ("call_" + local_response_id().removeprefix("resp_local_")[:18])
     result.raw_arguments = final_args
     result.args_done_seen = True
-    if name == cfg.function_name or (not name and _looks_like_emit_value_arguments(final_args, cfg)):
-        result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry)
+    if name == cfg.function_name or (not name and _looks_like_emit_value_arguments_loose(final_args, cfg)):
+        allow_dynamic_tools = str(getattr(n, "tool_bridge_target", "desktop")).lower() not in {"tui", "cli", "terminal"}
+        result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry, allow_dynamic_tools=allow_dynamic_tools)
         return
     if name == cfg.final_answer_tool_name:
         obj, malformed = _json_object_from_text(final_args)
@@ -433,6 +447,14 @@ def audit_from_result(result: Bill015Result, n: NormalizedRequest, mode: str, fa
         "duration_ms": result.duration_ms,
         "retry_count": result.retry_count,
         "retry_reasons": result.retry_reasons,
+        "upstream_key_index": result.upstream_key_index,
+        "upstream_key_count": result.upstream_key_count,
+        "key_switch_count": result.key_switch_count,
+        "compaction_count": result.compaction_count,
+        "compacted_item_count": result.compacted_item_count,
+        "clipped_tool_output_count": result.clipped_tool_output_count,
+        "empty_stream_retry_count": result.empty_stream_retry_count,
+        "stream_timeout_retry_count": result.stream_timeout_retry_count,
         "fallback_used": fallback_used,
         "error": result.error,
         "event_sequence": result.event_sequence[-50:],
@@ -492,51 +514,229 @@ def compute_delta(pre: dict[str, Any] | None, post: dict[str, Any] | None) -> di
             out[k] = post[k] - pre[k]
     return out or None
 
+def _record_key_selection(result: Bill015Result, selection: ApiKeySelection) -> None:
+    result.upstream_key_index = selection.index + 1
+    result.upstream_key_count = selection.count
+
+
+def _rotate_after_key_error(
+    result: Bill015Result,
+    selection: ApiKeySelection,
+    tried_keys: set[str],
+    reason: str,
+    cfg: Settings,
+) -> ApiKeySelection | None:
+    next_selection = upstream_key_pool(cfg).rotate_after_failure(selection.key, tried_keys)
+    if next_selection is None:
+        return None
+    tried_keys.add(next_selection.key)
+    result.retry_count += 1
+    result.key_switch_count += 1
+    audit_reason = f"{reason}:key_switch:{selection.index + 1}->{next_selection.index + 1}"
+    result.retry_reasons.append(audit_reason)
+    result.event_sequence.append(f"retry:{audit_reason}")
+    _record_key_selection(result, next_selection)
+    return next_selection
+
+
+async def _rotate_after_key_error_with_delay(
+    result: Bill015Result,
+    selection: ApiKeySelection,
+    tried_keys: set[str],
+    reason: str,
+    cfg: Settings,
+) -> ApiKeySelection | None:
+    await asyncio.sleep(KEY_ROTATION_DELAY_SECONDS)
+    return _rotate_after_key_error(result, selection, tried_keys, reason, cfg)
+
+def _reset_result_for_key_retry(result: Bill015Result) -> None:
+    result.upstream_response_id = None
+    result.answer = ""
+    result.bridge_mode = "answer"
+    result.tool_calls = []
+    result.raw_arguments = ""
+    result.function_call_seen = False
+    result.args_done_seen = False
+    result.upstream_completed_seen = False
+    result.aborted = False
+    result.malformed_function_args = False
+    result.repaired_args = False
+    result.error = None
+
+
+def _record_compaction(result: Bill015Result, reason: str, before_tokens: int, after_tokens: int, removed: int, clipped: int, *, count_retry: bool = True) -> None:
+    result.compaction_count += 1
+    result.compacted_item_count += removed
+    result.clipped_tool_output_count += clipped
+    if count_retry:
+        result.retry_count += 1
+    audit_reason = f"{reason}:{before_tokens}->{after_tokens}:removed={removed}:clipped={clipped}"
+    result.retry_reasons.append(audit_reason)
+    result.event_sequence.append(f"retry:{audit_reason}")
+
+
+def _compact_for_context_recovery(payload: dict[str, Any], result: Bill015Result, cfg: Settings, reason: str, attempt: int, *, aggressive: bool) -> tuple[dict[str, Any], bool]:
+    before = payload_input_tokens(payload)
+    target_percent = max(35, cfg.compact_target_percent - attempt * 10)
+    target = min(context_threshold_tokens(cfg.context_window_tokens, target_percent), max(8_000, int(before * 0.80)))
+    compacted, removed, clipped = compact_payload_history(payload, target, aggressive=aggressive, latest_tool_output_max_chars=cfg.latest_tool_output_max_chars)
+    after = payload_input_tokens(compacted)
+    if after >= before:
+        return payload, False
+    _record_compaction(result, reason, before, after, removed, clipped)
+    return compacted, True
+
+
+def _empty_upstream_detail(attempts: int) -> dict[str, Any]:
+    return {
+        "message": f"upstream ended without a final answer or tool call after {attempts} attempts",
+        "code": "upstream_empty_completion",
+    }
+
+
+def _empty_stream_exhausted_answer(attempts: int) -> str:
+    return (
+        f"上游连续 {attempts} 次没有返回最终答案或工具调用，代理已停止继续重试并避免断流。\n"
+        "这通常是上游 SSE 空结束、长上下文/大工具输出导致模型未到达 final-action 边界，"
+        "或上游临时静默。请直接重试当前步骤；如果反复出现，建议开启新会话/压缩历史或减少最近工具输出。"
+    )
+
+
+def _stream_recovery_detail(reason: str, attempts: int) -> dict[str, Any]:
+    return {
+        "message": f"upstream stream did not reach a final answer or tool call after {attempts} recovery attempts: {reason}",
+        "code": "upstream_stream_recovery_exhausted",
+        "reason": reason,
+    }
+
+
+async def _retry_stream_recovery(
+    payload: dict[str, Any],
+    result: Bill015Result,
+    cfg: Settings,
+    reason: str,
+    attempt: int,
+    precompact_limit: int,
+) -> tuple[dict[str, Any], bool]:
+    """Retry recoverable mid-stream stalls without surfacing Codex disconnects.
+
+    The native Codex client is strict about receiving either final text or
+    `response.function_call_arguments.done`.  A slow/stalled upstream can close
+    or time out after partial reasoning/events, which used to leak as
+    `stream disconnected before completion`.  Treat that as a recoverable
+    upstream attempt: reinforce the final-action instruction, compact if the
+    payload is near the context ceiling, and restart the upstream stream.
+    """
+    if attempt >= max(0, cfg.stream_recovery_retries):
+        return payload, False
+    result.stream_timeout_retry_count += 1
+    result.retry_count += 1
+    audit_reason = f"{reason}_retry:{attempt + 1}"
+    result.retry_reasons.append(audit_reason)
+    result.event_sequence.append(f"retry:{audit_reason}")
+    recovered = reinforce_final_action(payload)
+    if payload_input_tokens(recovered) >= precompact_limit:
+        recovered, _ = _compact_for_context_recovery(
+            recovered,
+            result,
+            cfg,
+            f"{reason}_compaction",
+            attempt,
+            aggressive=True,
+        )
+    _reset_result_for_key_retry(result)
+    await asyncio.sleep(_retry_delay_seconds(attempt, cfg))
+    return recovered, True
+
+
 async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = settings, local_request_id: str | None = None) -> Bill015Result:
     request_id = local_request_id or local_response_id()
     result = Bill015Result(local_request_id=request_id)
     start = time.perf_counter()
     if mode == "verify":
         result.verify_pre = await fetch_user_self(cfg)
-    if not cfg.upstream_api_key:
+
+    selection = upstream_key_pool(cfg).current()
+    if selection is None:
         raise HTTPException(status_code=500, detail=f"Missing upstream API key env {cfg.upstream_api_key_env}")
+    tried_keys = {selection.key}
+    _record_key_selection(result, selection)
 
     payload = build_bill015_payload(n, cfg)
-    active_tools: dict[str, dict[str, Any]] = {}
-    args_buffers: dict[str, list[str]] = {}
-    custom_buffers: dict[str, list[str]] = {}
+    precompact_limit = context_threshold_tokens(cfg.context_window_tokens, cfg.auto_compact_percent)
+    initial_tokens = payload_input_tokens(payload)
+    if initial_tokens >= precompact_limit:
+        target = context_threshold_tokens(cfg.context_window_tokens, cfg.compact_target_percent)
+        compacted, removed, clipped = compact_payload_history(
+            payload,
+            target,
+            aggressive=False,
+            latest_tool_output_max_chars=cfg.latest_tool_output_max_chars,
+        )
+        after_tokens = payload_input_tokens(compacted)
+        if after_tokens < initial_tokens or removed or clipped:
+            payload = compacted
+            _record_compaction(result, "preemptive_compaction", initial_tokens, after_tokens, removed, clipped, count_retry=False)
     answer_buffer: list[str] = []
-    args_done_deadline = _args_done_deadline(cfg)
-    headers = upstream_auth_headers(stream=True, cfg=cfg)
     try:
         max_retries = 0 if cfg.strict_zero else max(0, int(getattr(cfg, "upstream_retries", 0)))
+        transient_attempt = 0
+        context_retry_attempt = 0
+        empty_stream_attempt = 0
+        stream_recovery_attempt = 0
         async with httpx.AsyncClient(timeout=http_timeout(cfg)) as client:
-            for attempt in range(max_retries + 1):
-                active_tools = {}
-                args_buffers = {}
-                custom_buffers = {}
+            while True:
+                active_tools: dict[str, dict[str, Any]] = {}
+                args_buffers: dict[str, list[str]] = {}
+                custom_buffers: dict[str, list[str]] = {}
                 answer_buffer = []
                 args_done_deadline = _args_done_deadline(cfg)
                 attempt_event_len = len(result.event_sequence)
+                rotated_selection: ApiKeySelection | None = None
+                context_retry_requested = False
+                stream_recovery_reason: str | None = None
+                headers = upstream_auth_headers(stream=True, cfg=cfg, api_key=selection.key)
+
                 try:
                     async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=payload) as resp:
                         if resp.status_code != 200:
                             body = await resp.aread()
                             detail = sanitize_upstream_error_detail(
-                                resp.status_code,
-                                body,
-                                content_type=resp.headers.get("content-type", ""),
+                                resp.status_code, body, content_type=resp.headers.get("content-type", "")
                             )
-                            if attempt < max_retries and _is_retryable_pre_stream_failure(resp.status_code, detail):
+                            if is_context_length_exceeded(body) and context_retry_attempt < max(0, cfg.context_recovery_retries):
+                                recovered, changed = _compact_for_context_recovery(
+                                    payload, result, cfg, "context_length_exceeded", context_retry_attempt, aggressive=True
+                                )
+                                if changed:
+                                    payload = recovered
+                                    context_retry_attempt += 1
+                                    transient_attempt = 0
+                                    _reset_result_for_key_retry(result)
+                                    continue
+                            rotation_reason = key_rotation_error_reason(body)
+                            if rotation_reason:
+                                rotated_selection = await _rotate_after_key_error_with_delay(result, selection, tried_keys, rotation_reason, cfg)
+                                if rotated_selection is not None:
+                                    selection = rotated_selection
+                                    transient_attempt = 0
+                                    _reset_result_for_key_retry(result)
+                                    continue
+                            if transient_attempt < max_retries and _is_retryable_pre_stream_failure(resp.status_code, detail):
                                 result.retry_count += 1
                                 reason = f"http_{resp.status_code}"
                                 result.retry_reasons.append(reason)
                                 result.event_sequence.append(f"retry:{reason}")
-                                await asyncio.sleep(_retry_delay_seconds(attempt, cfg))
+                                await asyncio.sleep(_retry_delay_seconds(transient_attempt, cfg))
+                                transient_attempt += 1
                                 continue
                             raise HTTPException(status_code=502, detail=detail)
+
                         async for ev in parse_async_sse_lines(resp.aiter_lines()):
-                            _raise_if_args_done_timed_out(args_done_deadline)
+                            if args_done_deadline is not None and time.perf_counter() > args_done_deadline:
+                                stream_recovery_reason = "args_done_timeout"
+                                await resp.aclose()
+                                break
                             obj = ev.json
                             typ = (obj or {}).get("type") or ev.event
                             if typ:
@@ -626,25 +826,107 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                                     result.answer = _extract_response_text(obj)
                                 break
                             elif typ in {"response.failed", "error"}:
+                                if is_context_length_exceeded(obj) and context_retry_attempt < max(0, cfg.context_recovery_retries):
+                                    recovered, changed = _compact_for_context_recovery(
+                                        payload, result, cfg, "context_length_exceeded", context_retry_attempt, aggressive=True
+                                    )
+                                    if changed:
+                                        payload = recovered
+                                        context_retry_attempt += 1
+                                        context_retry_requested = True
+                                        await resp.aclose()
+                                        break
+                                rotation_reason = key_rotation_error_reason(obj)
+                                if rotation_reason:
+                                    rotated_selection = await _rotate_after_key_error_with_delay(result, selection, tried_keys, rotation_reason, cfg)
+                                    if rotated_selection is not None:
+                                        await resp.aclose()
+                                        break
                                 raise RuntimeError(json.dumps(obj, ensure_ascii=False)[:2000])
+
+                    if context_retry_requested:
+                        transient_attempt = 0
+                        _reset_result_for_key_retry(result)
+                        continue
+                    if stream_recovery_reason is not None:
+                        payload, retrying = await _retry_stream_recovery(
+                            payload,
+                            result,
+                            cfg,
+                            stream_recovery_reason,
+                            stream_recovery_attempt,
+                            precompact_limit,
+                        )
+                        if retrying:
+                            stream_recovery_attempt += 1
+                            transient_attempt = 0
+                            continue
+                        raise HTTPException(
+                            status_code=504,
+                            detail=_stream_recovery_detail(stream_recovery_reason, stream_recovery_attempt),
+                        )
+                    if rotated_selection is not None:
+                        selection = rotated_selection
+                        transient_attempt = 0
+                        _reset_result_for_key_retry(result)
+                        continue
+                    if not result.args_done_seen and not result.answer and not result.error:
+                        if empty_stream_attempt < max(0, cfg.empty_stream_retries):
+                            empty_stream_attempt += 1
+                            result.empty_stream_retry_count += 1
+                            result.retry_count += 1
+                            reason = f"empty_stream_retry:{empty_stream_attempt}"
+                            result.retry_reasons.append(reason)
+                            result.event_sequence.append(f"retry:{reason}")
+                            payload = reinforce_final_action(payload)
+                            if payload_input_tokens(payload) >= precompact_limit:
+                                payload, _ = _compact_for_context_recovery(
+                                    payload, result, cfg, "empty_stream_compaction", empty_stream_attempt - 1, aggressive=True
+                                )
+                            _reset_result_for_key_retry(result)
+                            continue
+                        attempts = empty_stream_attempt + 1
+                        result.answer = _empty_stream_exhausted_answer(attempts)
+                        result.bridge_mode = "answer"
+                        result.args_done_seen = True
+                        result.upstream_completed_seen = True
+                        result.retry_reasons.append(f"empty_stream_exhausted:{attempts}")
+                        result.event_sequence.append(f"empty_stream_exhausted:{attempts}")
+                        break
+                    if result.error:
+                        raise HTTPException(status_code=502, detail={"message": result.error, "code": "upstream_incomplete"})
                     break
                 except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.PoolTimeout, httpx.TimeoutException) as e:
-                    # Retry only if this attempt failed before yielding any
-                    # upstream SSE event. Once the model has started streaming,
-                    # retrying could duplicate work or affect billing.
-                    if attempt < max_retries and len(result.event_sequence) == attempt_event_len:
+                    reason = type(e).__name__
+                    if isinstance(e, httpx.ReadTimeout):
+                        payload, retrying = await _retry_stream_recovery(
+                            payload,
+                            result,
+                            cfg,
+                            reason,
+                            stream_recovery_attempt,
+                            precompact_limit,
+                        )
+                        if retrying:
+                            stream_recovery_attempt += 1
+                            transient_attempt = 0
+                            continue
+                    if transient_attempt < max_retries and len(result.event_sequence) == attempt_event_len:
                         result.retry_count += 1
-                        reason = type(e).__name__
                         result.retry_reasons.append(reason)
                         result.event_sequence.append(f"retry:{reason}")
-                        await asyncio.sleep(_retry_delay_seconds(attempt, cfg))
+                        await asyncio.sleep(_retry_delay_seconds(transient_attempt, cfg))
+                        transient_attempt += 1
                         continue
                     raise
+
         if mode == "verify":
             await asyncio.sleep(0.5)
             result.verify_post = await fetch_user_self(cfg)
             result.verify_delta = compute_delta(result.verify_pre, result.verify_post)
         _finalize_result_without_args_done(result, answer_buffer)
+        if result.error:
+            raise HTTPException(status_code=502, detail={"message": result.error, "code": "upstream_empty_completion"})
         return result
     except HTTPException:
         raise

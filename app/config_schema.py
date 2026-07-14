@@ -19,6 +19,7 @@ class ServerConfig(StrictConfigModel):
 class UpstreamConfig(StrictConfigModel):
     base_url: str | None = None
     api_key: str | None = None
+    api_keys: list[str] | None = None
     api_key_env: str | None = None
     cookie: str | None = None
     user_id: str | None = None
@@ -82,6 +83,13 @@ class LimitsConfig(StrictConfigModel):
     max_request_bytes: int | None = None
     upstream_retries: int | None = None
     upstream_retry_backoff_ms: int | None = None
+    context_window_tokens: int | None = None
+    auto_compact_percent: int | None = None
+    compact_target_percent: int | None = None
+    context_recovery_retries: int | None = None
+    empty_stream_retries: int | None = None
+    stream_recovery_retries: int | None = None
+    latest_tool_output_max_chars: int | None = None
     args_done_timeout_ms: int | None = None
     upstream_idle_timeout_ms: int | None = None
     circuit_failures: int | None = None

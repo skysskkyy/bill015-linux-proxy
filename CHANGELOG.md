@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.4.3] - 2026-07-13
+
+### Fixed
+- Added bounded recovery for mid-stream `ReadTimeout` and local `response.function_call_arguments.done` wait timeouts.
+- Stream recovery reinforces the final-action instruction, compacts near-limit payloads, and retries without surfacing Codex `stream disconnected before completion` errors.
+- Raised default upstream/idle/args-done wait budgets to 900s for long reasoning/tool-selection turns.
+- Aligned local compaction summaries with Codex history shape (`user`/`input_text`) and added last-resort truncation for oversized latest user turns.
+
+### Tests
+- Added regressions for args-done timeout recovery, mid-stream ReadTimeout recovery, Codex-shaped compaction summaries, and oversized latest-user clipping.
+
+## [0.4.2] - 2026-07-13
+
+### Fixed
+- Added Codex-style pre-turn context compaction at 90% of the configured context window.
+- Added mid-turn recovery for `context_length_exceeded` by removing oldest history first while preserving the latest user request and latest tool batch.
+- Replaced the synthetic empty-stream success message with bounded reasoning-only retries and a structured failure after exhaustion.
+
+### Tests
+- Added regressions for context-error detection, latest-turn preservation, and reasoning-only retry prompting.
+## [0.4.1] - 2026-07-13
+
+### Changed
+- Rotate to the next API key when an upstream HTTP or SSE error contains `If this seems wrong, try rephrasing your request`.
+- Preserve per-request key de-duplication, exhaustion protection, strict-zero behavior, and reason-specific audit entries.
+
+### Tests
+- Added matcher, HTTP integration, and SSE integration regressions for the rephrase-request error.
+## [0.4.0] - 2026-07-13
+
+### Added
+- Added an ordered, de-duplicated, concurrency-safe API key pool with legacy single-key compatibility.
+- Added targeted key rotation for upstream HTTP or SSE error objects containing `sequence_number: 113`, including strict-zero mode.
+- Added non-secret key-pool health metadata and per-request key-switch audit fields.
+
+### Tests
+- Added regressions for HTTP and SSE rotation, non-target errors, key exhaustion, and normal JSON forwarding.
 All notable changes to this local proxy are tracked here.
 
 ## [0.3.9] - 2026-07-13

@@ -162,6 +162,7 @@ def build_typed_tool_call_schema(
     *,
     allow_generic_fallback: bool = False,
     max_tools: int = 96,
+    include_dynamic_tools: bool = True,
 ) -> dict[str, Any]:
     """Build an upstream-compatible item schema for emit_value.tool_calls.
 
@@ -177,7 +178,7 @@ def build_typed_tool_call_schema(
     enums when a registry is available.  This is weaker than a per-tool oneOf,
     but much better than asking the model to infer names from prose.
     """
-    return _generic_tool_call_schema(tool_registry or {}, allow_generic_fallback=allow_generic_fallback, max_tools=max_tools)
+    return _generic_tool_call_schema(tool_registry or {}, allow_generic_fallback=allow_generic_fallback, max_tools=max_tools, include_dynamic_tools=include_dynamic_tools)
 
 
 def _typed_tool_call_variants(registry: dict[str, dict[str, Any]], *, max_tools: int) -> list[dict[str, Any]]:
@@ -262,13 +263,14 @@ def _generic_tool_call_schema(
     *,
     allow_generic_fallback: bool = False,
     max_tools: int = 96,
+    include_dynamic_tools: bool = True,
 ) -> dict[str, Any]:
     registry = tool_registry or {}
-    type_schema: dict[str, Any] = {"type": "string", "enum": ["auto", "function", "custom", "tool_search", "web_search"]}
+    type_schema: dict[str, Any] = {"type": "string", "enum": ["auto", "function", "custom"]}
     namespace_schema: dict[str, Any] = {"type": "string"}
     name_schema: dict[str, Any] = {"type": "string"}
     if registry and not allow_generic_fallback:
-        names, namespaces, call_types = _tool_schema_enums(registry, max_tools=max_tools)
+        names, namespaces, call_types = _tool_schema_enums(registry, max_tools=max_tools, include_dynamic_tools=include_dynamic_tools)
         if names:
             name_schema = {
                 "type": "string",
@@ -304,7 +306,7 @@ def _generic_tool_call_schema(
     }
 
 
-def _tool_schema_enums(registry: dict[str, dict[str, Any]], *, max_tools: int) -> tuple[list[str], list[str], list[str]]:
+def _tool_schema_enums(registry: dict[str, dict[str, Any]], *, max_tools: int, include_dynamic_tools: bool = True) -> tuple[list[str], list[str], list[str]]:
     names: list[str] = []
     namespaces: list[str] = [""]
     call_types: list[str] = []
@@ -319,6 +321,10 @@ def _tool_schema_enums(registry: dict[str, dict[str, Any]], *, max_tools: int) -
         if raw_type == "custom" or output_name == "apply_patch":
             call_type = "custom"
         elif raw_type in {"tool_search", "web_search"}:
+            if not include_dynamic_tools:
+                # Codex TUI currently rejects dynamic/client-side tool calls
+                # with: "Dynamic tool calls are not available in TUI yet."
+                continue
             call_type = raw_type
         key = (namespace, output_name, call_type)
         if not output_name or key in seen_specs:
@@ -333,15 +339,8 @@ def _tool_schema_enums(registry: dict[str, dict[str, Any]], *, max_tools: int) -
         _append_unique(call_types, call_type)
         if len(seen_specs) >= max_tools:
             break
-    # Keep compatibility with discovery/rewrite paths when those are present.
-    if "tool_search" in registry:
-        _append_unique(names, "tool_search")
-        _append_unique(call_types, "tool_search")
-    if "web_search" in registry:
-        _append_unique(names, "web_search")
-        _append_unique(call_types, "web_search")
     if not call_types:
-        call_types = ["auto", "function", "custom", "tool_search", "web_search"]
+        call_types = ["auto", "function", "custom"]
     return names[: max_tools * 3], namespaces[: max_tools + 1], call_types
 
 
@@ -456,6 +455,7 @@ def resolve_bridge_tool_call(
     call: dict[str, Any],
     tool_registry: dict[str, dict[str, Any]] | None = None,
     cfg: Settings = settings,
+    allow_dynamic_tools: bool = True,
 ) -> BridgeToolCall | None:
     raw_name = _call_name(call)
     raw_namespace = _call_namespace(call)
@@ -465,31 +465,31 @@ def resolve_bridge_tool_call(
     requested_type = str(call.get("type") or call.get("call_type") or "auto").lower()
     registry = tool_registry or {}
     spec = _resolve_tool_spec(raw_name, raw_namespace, registry)
-    discovery_request = raw_name == "tool_search" or requested_type == "tool_search"
     if not spec and not cfg.tool_bridge_allow_unknown_tools:
-        if not discovery_request:
-            return None
-        spec = {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}
+        return None
     fallback_namespace, fallback_name = _split_namespace_name(raw_name, raw_namespace)
     if raw_namespace:
         fallback_namespace = raw_namespace
-    call_type = requested_type if requested_type in {"function", "custom", "tool_search", "web_search"} else str(spec.get("call_type") or "function")
+    call_type = requested_type if requested_type in {"function", "custom"} else str(spec.get("call_type") or "function")
     output_name = str(spec.get("output_name") or fallback_name or raw_name)
     namespace = str(spec.get("namespace") or fallback_namespace or "") or None
 
     if spec.get("raw_type") == "custom" or output_name == "apply_patch" or raw_name == "apply_patch":
         call_type = "custom"
-    if spec.get("raw_type") == "tool_search":
-        call_type = "tool_search"
-    if spec.get("raw_type") == "web_search" or call_type == "web_search" or raw_name == "web_search":
-        # Never route to upstream/server-side web_search. Convert it to native
-        # Codex tool_search so local browser/chrome/node_repl/shell tools can be
-        # exposed and used without normal web_search billing semantics.
-        call_type = "tool_search"
+    if spec.get("raw_type") in {"tool_search", "web_search"} or raw_name in {"tool_search", "web_search"}:
+        if not allow_dynamic_tools:
+            return None
         output_name = "tool_search"
-        arguments = _local_tool_search_arguments(call)
-    else:
-        arguments = _custom_input(call) if call_type == "custom" else _function_arguments(call)
+        arguments = _local_tool_search_arguments(call) if raw_name == "web_search" or spec.get("raw_type") == "web_search" else _function_arguments(call)
+        return BridgeToolCall(
+            id="call_" + uuid.uuid4().hex[:24],
+            name=output_name,
+            arguments=arguments,
+            call_type="tool_search",
+            requested_name=raw_name,
+            namespace=None,
+        )
+    arguments = _custom_input(call) if call_type == "custom" else _function_arguments(call)
     return BridgeToolCall(
         id="call_" + uuid.uuid4().hex[:24],
         name=output_name,
@@ -726,8 +726,27 @@ def parse_function_arguments(
     raw: str,
     cfg: Settings = settings,
     tool_registry: dict[str, dict[str, Any]] | None = None,
+    allow_dynamic_tools: bool = True,
 ) -> tuple[str, bool, bool, str, list[BridgeToolCall]]:
-    obj, malformed, repaired = _load_arguments_object(raw)
+    try:
+        obj, malformed, repaired = _load_arguments_object(raw)
+    except Exception as exc:
+        # The upstream model sometimes reaches the function-arguments boundary
+        # with truncated JSON or a bad escaped string.  Native Codex treats a
+        # malformed tool call as a model/tool-result problem, not as a broken
+        # HTTP stream.  Keep the client stream well-formed and surface a normal
+        # assistant item instead of letting JSONDecodeError bubble up as
+        # `stream disconnected before completion`.
+        preview = _argument_preview(raw)
+        return (
+            "上游返回了不完整或非法的工具调用 JSON，代理已阻止本轮断流。请重试当前步骤；如果连续出现，通常是历史/工具输出过大导致上游在生成 arguments 时截断。"
+            + f"\n解析错误：{type(exc).__name__}: {exc}"
+            + (f"\n参数片段：{preview}" if preview else ""),
+            True,
+            False,
+            "answer",
+            [],
+        )
     mode = obj.get("mode") or ("answer" if cfg.answer_field in obj else "answer")
     answer = obj.get(cfg.answer_field, "")
     tool_calls: list[BridgeToolCall] = []
@@ -735,21 +754,18 @@ def parse_function_arguments(
     if mode == "tool_call":
         raw_calls = _iter_call_objects(obj.get("tool_calls"))
         for call in raw_calls:
-            resolved = resolve_bridge_tool_call(call, tool_registry)
+            resolved = resolve_bridge_tool_call(call, tool_registry, allow_dynamic_tools=allow_dynamic_tools)
+            if resolved:
+                tool_calls.append(resolved)
+        if not tool_calls and allow_dynamic_tools and raw_calls:
+            fallback = _fallback_tool_search_for_invalid_calls(raw_calls, answer)
+            resolved = resolve_bridge_tool_call(fallback, tool_registry, allow_dynamic_tools=True)
             if resolved:
                 tool_calls.append(resolved)
         tool_calls = expand_deferred_tool_searches(tool_calls, tool_registry, cfg)
         if not tool_calls:
-            fallback = _fallback_tool_search_for_invalid_calls(raw_calls, answer)
-            resolved = resolve_bridge_tool_call(fallback, tool_registry)
-            if resolved:
-                tool_calls = [resolved]
-                # Keep recovery invisible in the UI. Codex native tool discovery
-                # appears as a tool event, not repeated assistant prose.
-                answer = answer if isinstance(answer, str) else ""
-            else:
-                mode = "answer"
-                answer = answer or "需要继续操作，但代理没有拿到可执行的本地工具调用。请重试一次。"
+            mode = "answer"
+            answer = answer or "需要继续操作，但代理没有拿到当前 TUI 可执行的具体本地工具。请重启/重连 Codex，让 MCP 工具直接出现在工具注册表中；代理不会再发起 TUI 不支持的动态 tool_search 调用。"
 
     if not isinstance(answer, str):
         answer = json.dumps(answer, ensure_ascii=False)

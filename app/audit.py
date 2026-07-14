@@ -20,6 +20,7 @@ SECRET_KEY_NAMES = {
     "authorization",
     "cookie",
     "api_key",
+    "api_keys",
     "token",
     "access_token",
     "refresh_token",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import time
 from typing import Any, AsyncIterator
@@ -8,9 +9,12 @@ import httpx
 from fastapi import HTTPException
 
 from .config import Settings, settings
+from .key_pool import ApiKeySelection, upstream_key_pool
 from .models import local_response_id
 from .sse import encode_sse
-from .upstream_errors import error_message_from_detail, sanitize_upstream_error_detail
+from .upstream_errors import error_message_from_detail, key_rotation_error_reason, sanitize_upstream_error_detail
+
+KEY_ROTATION_DELAY_SECONDS = 10 * 60
 
 
 def http_timeout(cfg: Settings = settings) -> httpx.Timeout | None:
@@ -26,9 +30,9 @@ def http_timeout(cfg: Settings = settings) -> httpx.Timeout | None:
     return httpx.Timeout(timeout=total, connect=connect, read=read, write=total, pool=total)
 
 
-def upstream_auth_headers(*, stream: bool = False, cfg: Settings = settings) -> dict[str, str]:
+def upstream_auth_headers(*, stream: bool = False, cfg: Settings = settings, api_key: str | None = None) -> dict[str, str]:
     headers = {
-        "Authorization": "Bearer " + cfg.upstream_api_key,
+        "Authorization": "Bearer " + (api_key or cfg.upstream_api_key),
         "Content-Type": "application/json",
         "User-Agent": "bill015-local-proxy/1.0",
     }
@@ -96,59 +100,101 @@ def _passthrough_failed_events(status_code: int, detail: dict[str, Any], body: d
     ]
 
 
+async def _next_key_after_rotation_error(
+    selection: ApiKeySelection,
+    tried_keys: set[str],
+    cfg: Settings,
+) -> ApiKeySelection | None:
+    await asyncio.sleep(KEY_ROTATION_DELAY_SECONDS)
+    next_selection = upstream_key_pool(cfg).rotate_after_failure(selection.key, tried_keys)
+    if next_selection is not None:
+        tried_keys.add(next_selection.key)
+    return next_selection
+
+
 async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) -> AsyncIterator[bytes]:
-    if not cfg.upstream_api_key:
+    selection = upstream_key_pool(cfg).current()
+    if selection is None:
         yield encode_sse({"type": "error", "error": {"message": f"Missing upstream API key env {cfg.upstream_api_key_env}"}}, "error")
         yield b"data: [DONE]\n\n"
         return
+    tried_keys = {selection.key}
+
     try:
         async with httpx.AsyncClient(timeout=http_timeout(cfg)) as client:
-            async with client.stream(
-                "POST",
-                cfg.upstream_base_url + "/v1/responses",
-                headers=upstream_auth_headers(stream=True, cfg=cfg),
-                json=prepare_passthrough_payload(body, cfg),
-            ) as resp:
-                if resp.status_code != 200:
-                    body_bytes = await resp.aread()
-                    detail = sanitize_upstream_error_detail(
-                        resp.status_code,
-                        body_bytes,
-                        content_type=resp.headers.get("content-type", ""),
-                    )
-                    for event in _passthrough_failed_events(resp.status_code, detail, body, cfg):
-                        yield event
+            while True:
+                async with client.stream(
+                    "POST",
+                    cfg.upstream_base_url + "/v1/responses",
+                    headers=upstream_auth_headers(stream=True, cfg=cfg, api_key=selection.key),
+                    json=prepare_passthrough_payload(body, cfg),
+                ) as resp:
+                    if resp.status_code != 200:
+                        body_bytes = await resp.aread()
+                        if key_rotation_error_reason(body_bytes):
+                            next_selection = await _next_key_after_rotation_error(selection, tried_keys, cfg)
+                            if next_selection is not None:
+                                selection = next_selection
+                                continue
+                        detail = sanitize_upstream_error_detail(
+                            resp.status_code, body_bytes, content_type=resp.headers.get("content-type", "")
+                        )
+                        for event in _passthrough_failed_events(resp.status_code, detail, body, cfg):
+                            yield event
+                        return
+
+                    chunks: list[bytes] = []
+                    async for chunk in resp.aiter_bytes():
+                        chunks.append(chunk)
+                    body_bytes = b"".join(chunks)
+                    if key_rotation_error_reason(body_bytes):
+                        next_selection = await _next_key_after_rotation_error(selection, tried_keys, cfg)
+                        if next_selection is not None:
+                            selection = next_selection
+                            continue
+                    yield body_bytes
                     return
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
     except Exception as e:
         yield encode_sse({"type": "error", "error": {"message": f"{type(e).__name__}: {e}", "type": "local_proxy_error"}}, "error")
         yield b"data: [DONE]\n\n"
 
 
 async def normal_forward_json(body: dict[str, Any], cfg: Settings = settings) -> dict[str, Any]:
-    if not cfg.upstream_api_key:
+    selection = upstream_key_pool(cfg).current()
+    if selection is None:
         raise HTTPException(status_code=500, detail=f"Missing upstream API key env {cfg.upstream_api_key_env}")
+    tried_keys = {selection.key}
+
     async with httpx.AsyncClient(timeout=http_timeout(cfg)) as client:
-        r = await client.post(
-            cfg.upstream_base_url + "/v1/responses",
-            headers=upstream_auth_headers(cfg=cfg),
-            json=prepare_passthrough_payload(body, cfg),
-        )
-    try:
-        obj = r.json()
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=sanitize_upstream_error_detail(
-                r.status_code,
-                r.text,
-                content_type=r.headers.get("content-type", ""),
-            ),
-        ) from e
-    if r.status_code < 200 or r.status_code >= 300:
-        raise HTTPException(
-            status_code=r.status_code,
-            detail=sanitize_upstream_error_detail(r.status_code, obj, preserve_json_body=True),
-        )
-    return obj
+        while True:
+            r = await client.post(
+                cfg.upstream_base_url + "/v1/responses",
+                headers=upstream_auth_headers(cfg=cfg, api_key=selection.key),
+                json=prepare_passthrough_payload(body, cfg),
+            )
+            try:
+                obj = r.json()
+            except Exception as e:
+                if not 200 <= r.status_code < 300 and key_rotation_error_reason(r.text):
+                    next_selection = await _next_key_after_rotation_error(selection, tried_keys, cfg)
+                    if next_selection is not None:
+                        selection = next_selection
+                        continue
+                raise HTTPException(
+                    status_code=502,
+                    detail=sanitize_upstream_error_detail(
+                        r.status_code, r.text, content_type=r.headers.get("content-type", "")
+                    ),
+                ) from e
+
+            if not 200 <= r.status_code < 300:
+                if key_rotation_error_reason(obj):
+                    next_selection = await _next_key_after_rotation_error(selection, tried_keys, cfg)
+                    if next_selection is not None:
+                        selection = next_selection
+                        continue
+                raise HTTPException(
+                    status_code=r.status_code,
+                    detail=sanitize_upstream_error_detail(r.status_code, obj, preserve_json_body=True),
+                )
+            return obj

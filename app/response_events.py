@@ -290,6 +290,8 @@ def _error_object(error: HTTPException) -> dict[str, Any]:
         "message": error_message_from_detail(error.detail),
         "type": "invalid_request_error" if 400 <= code < 500 else "server_error",
     }
+    if isinstance(error.detail, dict) and isinstance(error.detail.get("code"), str):
+        err["code"] = error.detail["code"]
     if isinstance(error.detail, dict) and "upstream_status" in error.detail:
         err["code"] = "upstream_error"
         err["upstream_status"] = error.detail.get("upstream_status")

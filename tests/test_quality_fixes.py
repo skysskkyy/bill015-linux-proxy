@@ -129,10 +129,10 @@ def test_unknown_tools_disabled_by_default_without_local_config(tmp_path):
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == "False 8192 8192 65536 300.0 300000 180000 0   False"
+    assert proc.stdout.strip() == "False 8192 8192 65536 900.0 900000 900000 0   False"
 
 
-def test_strict_unknown_tool_schema_allows_only_tool_search_discovery_without_registry(monkeypatch):
+def test_strict_unknown_tool_schema_disables_tui_dynamic_discovery_without_registry(monkeypatch):
     from app.config import settings
     from app.payloads import build_emit_value_schema
     from app.tool_bridge import parse_function_arguments
@@ -141,17 +141,16 @@ def test_strict_unknown_tool_schema_allows_only_tool_search_discovery_without_re
     schema = build_emit_value_schema(settings, {})
     params = schema["parameters"]["properties"]
 
-    assert params["mode"]["enum"] == ["answer", "tool_call"]
-    assert "tool_search" in params["tool_calls"]["description"]
+    assert params["mode"]["enum"] == ["answer"]
+    assert params["tool_calls"]["maxItems"] == 0
 
     answer, _, _, mode, calls = parse_function_arguments(
         '{"mode":"tool_call","answer":"","tool_calls":[{"type":"function","namespace":"","name":"not_registered","arguments":{},"input":""}]}',
         tool_registry={},
     )
-    assert mode == "tool_call"
-    assert answer == ""
-    assert calls[0].call_type == "tool_search"
-    assert "not_registered" in calls[0].arguments
+    assert mode == "answer"
+    assert calls == []
+    assert answer
 
     _, _, _, search_mode, search_calls = parse_function_arguments(
         json.dumps({
@@ -169,11 +168,11 @@ def test_strict_unknown_tool_schema_allows_only_tool_search_discovery_without_re
         }),
         tool_registry={},
     )
-    assert search_mode == "tool_call"
-    assert search_calls[0].call_type == "tool_search"
+    assert search_mode == "answer"
+    assert search_calls == []
 
 
-def test_invalid_or_display_named_tool_calls_fall_back_to_discovery_not_user_error():
+def test_invalid_or_display_named_tool_calls_do_not_trigger_tui_dynamic_discovery():
     from app.tool_bridge import parse_function_arguments
 
     answer, _, _, mode, calls = parse_function_arguments(
@@ -193,14 +192,12 @@ def test_invalid_or_display_named_tool_calls_fall_back_to_discovery_not_user_err
             ensure_ascii=False,
         ),
         tool_registry={"tool_search": {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}},
+        allow_dynamic_tools=False,
     )
 
-    assert mode == "tool_call"
+    assert mode == "answer"
     assert answer == "我需要读取当前 Chrome 页面。"
-    assert len(calls) == 1
-    assert calls[0].call_type == "tool_search"
-    assert "Chrome Integration" in calls[0].arguments
-    assert "Level 0" in calls[0].arguments
+    assert calls == []
 
     blank_answer, _, _, blank_mode, blank_calls = parse_function_arguments(
         json.dumps(
@@ -211,10 +208,11 @@ def test_invalid_or_display_named_tool_calls_fall_back_to_discovery_not_user_err
             }
         ),
         tool_registry={"tool_search": {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}},
+        allow_dynamic_tools=False,
     )
-    assert blank_mode == "tool_call"
-    assert blank_answer == ""
-    assert blank_calls[0].call_type == "tool_search"
+    assert blank_mode == "answer"
+    assert blank_answer
+    assert blank_calls == []
 
 
 def test_nested_native_call_shape_is_recovered():
@@ -444,6 +442,25 @@ def test_loop_guard_does_not_abort_repeated_successful_tool_call():
     assert any("allowed_repeated_success_to_avoid_abort" in reason for reason in result.retry_reasons)
 
 
+def test_malformed_emit_value_arguments_becomes_answer_not_stream_disconnect():
+    from app.normalization import normalize_responses_request
+    from app.sse import parse_sse_lines
+    from app.upstream import collect_bill015_result_from_events
+
+    n = normalize_responses_request({"model": "gpt-5.5", "input": "continue"})
+    bad_args = '{"mode":"tool_call","answer":"x","tool_calls":[{"type":"custom","name":"apply_patch","input":"*** Begin Patch\nunterminated'
+    data = json.dumps({"type": "response.function_call_arguments.done", "arguments": bad_args}, ensure_ascii=False)
+    events = parse_sse_lines(["event: response.function_call_arguments.done\n", f"data: {data}\n", "\n"])
+
+    result = collect_bill015_result_from_events(events, n)
+
+    assert result.bridge_mode == "answer"
+    assert result.tool_calls == []
+    assert result.malformed_function_args is True
+    assert "JSON" in result.answer
+    assert result.error is None
+
+
 def test_loop_guard_filters_repeated_success_from_mixed_batch():
     from app.models import Bill015Result, BridgeToolCall
     from app.normalization import normalize_responses_request
@@ -527,10 +544,10 @@ def test_loop_guard_stops_exact_failed_tool_replay():
     assert any("repeated_failed_tool_allowed" in reason for reason in result.retry_reasons)
 
 
-def test_tool_search_auto_expansion_is_disabled_by_default():
+def test_tool_search_auto_expansion_is_disabled_by_default_but_desktop_dynamic_call_survives():
     from app.tool_bridge import parse_function_arguments
 
-    _, _, _, mode, calls = parse_function_arguments(
+    answer, _, _, mode, calls = parse_function_arguments(
         json.dumps(
             {
                 "mode": "tool_call",
@@ -550,7 +567,128 @@ def test_tool_search_auto_expansion_is_disabled_by_default():
     )
 
     assert mode == "tool_call"
-    assert len([c for c in calls if c.call_type == "tool_search"]) == 1
+    assert len(calls) == 1
+    assert calls[0].call_type == "tool_search"
+    assert calls[0].name == "tool_search"
+
+
+def test_emit_value_schema_filters_tui_dynamic_tools(monkeypatch):
+    from app.config import settings
+    from app.payloads import build_emit_value_schema
+
+    monkeypatch.setattr(settings, "tool_bridge_allow_unknown_tools", False)
+    schema = build_emit_value_schema(
+        settings,
+        {"tool_search": {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}},
+        bridge_target="tui",
+    )
+    params = schema["parameters"]["properties"]
+
+    assert params["mode"]["enum"] == ["answer"]
+    assert params["tool_calls"]["maxItems"] == 0
+
+
+def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+    from app.tool_bridge import parse_function_arguments
+
+    monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(settings, "tool_bridge_allow_unknown_tools", False)
+
+    body = {
+        "model": "gpt-5.6-sol",
+        "client_metadata": {"client": "codex-cli"},
+        # Mirrors Codex core's Responses Lite request shape: native tools are
+        # not in top-level tools; they are carried in an additional_tools item.
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "shell_command",
+                        "description": "run shell",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"command": {"type": "string"}},
+                            "required": ["command"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    {
+                        "type": "tool_search",
+                        "execution": "client",
+                        "description": "discover deferred tools",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    {
+                        "type": "custom",
+                        "name": "apply_patch",
+                        "description": "patch",
+                        "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"},
+                    },
+                ],
+            },
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "list files"}]},
+        ],
+    }
+
+    n = normalize_responses_request(body)
+    payload = build_bill015_payload(n)
+    item_schema = payload["tools"][0]["parameters"]["properties"]["tool_calls"]["items"]
+    names = item_schema["properties"]["name"]["enum"]
+
+    assert n.tool_bridge_target == "tui"
+    assert "shell_command" in n.tool_registry
+    assert "apply_patch" in n.tool_registry
+    assert "tool_search" in n.tool_registry
+    assert "shell_command" in names
+    assert "apply_patch" in names
+    assert "tool_search" not in names
+    assert payload["tools"][0]["parameters"]["properties"]["mode"]["enum"] == ["answer", "tool_call"]
+    assert "shell_command" in payload["instructions"]
+    assert "apply_patch" in payload["instructions"]
+    assert "additional_tools" not in json.dumps(payload["input"], ensure_ascii=False)
+
+    _, _, _, mode, calls = parse_function_arguments(
+        json.dumps(
+            {
+                "mode": "tool_call",
+                "answer": "",
+                "tool_calls": [{"type": "function", "name": "shell_command", "arguments": {"command": "Get-ChildItem"}, "input": ""}],
+            }
+        ),
+        tool_registry=n.tool_registry,
+        allow_dynamic_tools=False,
+    )
+    assert mode == "tool_call"
+    assert calls[0].name == "shell_command"
+
+
+def test_emit_value_schema_preserves_desktop_dynamic_tools(monkeypatch):
+    from app.config import settings
+    from app.payloads import build_emit_value_schema
+
+    monkeypatch.setattr(settings, "tool_bridge_allow_unknown_tools", False)
+    schema = build_emit_value_schema(
+        settings,
+        {"tool_search": {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}},
+        bridge_target="desktop",
+    )
+    params = schema["parameters"]["properties"]
+
+    assert params["mode"]["enum"] == ["answer", "tool_call"]
+    assert "maxItems" not in params["tool_calls"]
+    assert "tool_search" in params["tool_calls"]["items"]["properties"]["name"]["enum"]
 
 
 def test_payload_output_budgets_and_compaction_budget(monkeypatch):
@@ -743,6 +881,29 @@ def test_bill015_payload_normalizes_call_output_pairs_without_truncating_outputs
         "execution": "client",
         "tools": [],
     }
+
+
+def test_bill015_payload_rewrites_invalid_function_call_item_ids():
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.5",
+            "input": [
+                {"type": "function_call", "id": "item_a14d5ab7e87a439abb75e01d", "call_id": "call_bad_id", "name": "shell_command", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_bad_id", "output": "ok"},
+            ],
+        }
+    )
+
+    payload = build_bill015_payload(n)
+    call = next(item for item in payload["input"] if item.get("type") == "function_call")
+    output = next(item for item in payload["input"] if item.get("type") == "function_call_output")
+
+    assert call["id"].startswith("fc_")
+    assert call["id"] != "item_a14d5ab7e87a439abb75e01d"
+    assert call["call_id"] == output["call_id"] == "call_bad_id"
 
 
 def test_latest_parallel_tool_batch_keeps_more_than_three_outputs():
@@ -1178,7 +1339,7 @@ def test_upstream_completed_without_args_done_uses_completed_text():
     assert "upstream_completed_without_args_done_used_text" in result.retry_reasons
 
 
-def test_upstream_empty_close_without_args_done_synthesizes_safe_answer():
+def test_upstream_empty_close_without_args_done_is_an_error():
     from app import upstream
     from app.models import NormalizedRequest
     from app.sse import SSEEvent
@@ -1187,7 +1348,742 @@ def test_upstream_empty_close_without_args_done_synthesizes_safe_answer():
 
     result = upstream.collect_bill015_result_from_events([SSEEvent("message", "[DONE]")], n)
 
-    assert "safely completed this stream" in result.answer
+    assert result.answer == ""
+    assert result.error == "upstream ended without a final answer or tool call"
     assert result.bridge_mode == "answer"
     assert result.args_done_seen is False
-    assert "upstream_completed_without_args_done_synthesized_safe_answer" in result.retry_reasons
+    assert "upstream_completed_without_args_done" in result.retry_reasons
+
+
+def test_execute_bill015_empty_stream_exhaustion_returns_answer_not_http_error(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.models import NormalizedRequest
+
+    class EmptyStreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            if False:
+                yield ""
+
+        async def aclose(self):
+            return None
+
+    class DummyClient:
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            DummyClient.calls += 1
+            return EmptyStreamResponse()
+
+    monkeypatch.setattr(settings, "upstream_api_key_file_value", "sk-test")
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(settings, "empty_stream_retries", 2)
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="Return OK", want_stream=False, client_api="responses", is_primary_path=True)
+    result = asyncio.run(upstream.execute_bill015(n, "exploit"))
+
+    assert DummyClient.calls == 3
+    assert result.bridge_mode == "answer"
+    assert result.error is None
+    assert result.args_done_seen is True
+    assert "empty_stream_exhausted:3" in result.retry_reasons
+    assert "没有返回最终答案或工具调用" in result.answer
+
+
+
+def _configure_test_key_pool(monkeypatch, settings, primary: str, additional: list[str]) -> None:
+    monkeypatch.delenv(settings.upstream_api_key_env, raising=False)
+    monkeypatch.setattr(settings, "upstream_api_key_file_value", primary)
+    monkeypatch.setattr(settings, "upstream_api_keys_file_value", additional)
+
+
+def test_cyber_policy_error_matcher_uses_logged_error_fields():
+    from app.upstream_errors import CYBER_POLICY_ERROR_MESSAGE, is_cyber_policy_rotation_error, key_rotation_error_reason
+
+    event = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request",
+            "code": "cyber_policy",
+            "message": CYBER_POLICY_ERROR_MESSAGE,
+            "param": None,
+        },
+        "sequence_number": 225,
+    }
+    assert is_cyber_policy_rotation_error(event)
+    assert key_rotation_error_reason(event) == "cyber_policy"
+    assert key_rotation_error_reason(f"event: error\ndata: {json.dumps(event)}\n\n") == "cyber_policy"
+    assert key_rotation_error_reason({"error": {"message": CYBER_POLICY_ERROR_MESSAGE}}) is None
+    assert key_rotation_error_reason({"error": {"code": "cyber_policy", "message": "If this seems wrong, try rephrasing your request"}}) is None
+    assert key_rotation_error_reason({"type": "error", "error": {"sequence_number": 113}}) is None
+
+
+def test_execute_bill015_rotates_key_on_http_cyber_policy_under_strict_zero(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.models import NormalizedRequest
+    from app.upstream_errors import CYBER_POLICY_ERROR_MESSAGE
+
+    success_lines = [
+        'event: response.output_item.added',
+        'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"emit_value"}}',
+        '',
+        'event: response.function_call_arguments.done',
+        'data: {"type":"response.function_call_arguments.done","arguments":"{\\"mode\\":\\"answer\\",\\"answer\\":\\"OK\\",\\"tool_calls\\":[]}"}',
+        '',
+    ]
+
+    class DummyStreamResponse:
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aread(self):
+            return json.dumps(
+                {"error": {"type": "invalid_request", "code": "cyber_policy", "message": CYBER_POLICY_ERROR_MESSAGE, "param": None}}
+            ).encode()
+
+        async def aiter_lines(self):
+            for line in success_lines:
+                yield line
+
+        async def aclose(self):
+            return None
+
+    class DummyClient:
+        authorizations = []
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            self.authorizations.append(kwargs["headers"]["Authorization"])
+            return DummyStreamResponse(400 if len(self.authorizations) == 1 else 200)
+
+    _configure_test_key_pool(monkeypatch, settings, "sk-http-1", ["sk-http-2", "sk-http-3"])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(settings, "upstream_retries", 0)
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(upstream.asyncio, "sleep", fake_sleep)
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="Return OK", want_stream=False, client_api="responses", is_primary_path=True)
+    result = asyncio.run(upstream.execute_bill015(n, "exploit"))
+
+    assert DummyClient.authorizations == ["Bearer sk-http-1", "Bearer sk-http-2"]
+    assert result.answer == "OK"
+    assert result.key_switch_count == 1
+    assert result.upstream_key_index == 2
+    assert result.upstream_key_count == 3
+    assert result.retry_count == 1
+    assert result.retry_reasons == ["cyber_policy:key_switch:1->2"]
+    assert sleeps == [600]
+
+
+def test_execute_bill015_rotates_key_on_sse_cyber_policy(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.models import NormalizedRequest
+    from app.upstream_errors import CYBER_POLICY_ERROR_MESSAGE
+
+    error_lines = [
+        'event: response.created',
+        'data: {"type":"response.created","response":{"id":"resp_bad"}}',
+        '',
+        'event: error',
+        'data: '
+        + json.dumps(
+            {"type": "error", "error": {"type": "invalid_request", "code": "cyber_policy", "message": CYBER_POLICY_ERROR_MESSAGE, "param": None}}
+        ),
+        '',
+    ]
+    success_lines = [
+        'event: response.output_item.added',
+        'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"emit_value"}}',
+        '',
+        'event: response.function_call_arguments.done',
+        'data: {"type":"response.function_call_arguments.done","arguments":"{\\"mode\\":\\"answer\\",\\"answer\\":\\"SSE OK\\",\\"tool_calls\\":[]}"}',
+        '',
+    ]
+
+    class DummyStreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            for line in self.lines:
+                yield line
+
+        async def aclose(self):
+            return None
+
+    class DummyClient:
+        authorizations = []
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            self.authorizations.append(kwargs["headers"]["Authorization"])
+            return DummyStreamResponse(error_lines if len(self.authorizations) == 1 else success_lines)
+
+    _configure_test_key_pool(monkeypatch, settings, "sk-sse-1", ["sk-sse-2"])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(settings, "upstream_retries", 0)
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(upstream.asyncio, "sleep", fake_sleep)
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="Return OK", want_stream=False, client_api="responses", is_primary_path=True)
+    result = asyncio.run(upstream.execute_bill015(n, "exploit"))
+
+    assert DummyClient.authorizations == ["Bearer sk-sse-1", "Bearer sk-sse-2"]
+    assert result.answer == "SSE OK"
+    assert result.key_switch_count == 1
+    assert result.upstream_response_id is None
+    assert sleeps == [600]
+
+
+def test_execute_bill015_stops_after_cyber_policy_exhausts_key_pool(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.models import NormalizedRequest
+    from app.upstream_errors import CYBER_POLICY_ERROR_MESSAGE
+
+    class DummyStreamResponse:
+        status_code = 400
+        headers = {"content-type": "application/json"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aread(self):
+            return json.dumps({"error": {"type": "invalid_request", "code": "cyber_policy", "message": CYBER_POLICY_ERROR_MESSAGE}}).encode()
+
+    class DummyClient:
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            DummyClient.calls += 1
+            return DummyStreamResponse()
+
+    _configure_test_key_pool(monkeypatch, settings, "sk-exhaust-1", ["sk-exhaust-2"])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(settings, "upstream_retries", 0)
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(upstream.asyncio, "sleep", fake_sleep)
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="x", want_stream=False, client_api="responses", is_primary_path=True)
+
+    with __import__("pytest").raises(HTTPException):
+        asyncio.run(upstream.execute_bill015(n, "exploit"))
+    assert DummyClient.calls == 2
+    assert sleeps == [600, 600]
+
+
+def test_normal_forward_json_rotates_only_for_cyber_policy(monkeypatch):
+    from app import upstream_client
+    from app.config import settings
+    from app.upstream_errors import CYBER_POLICY_ERROR_MESSAGE
+
+    class DummyResponse:
+        headers = {"content-type": "application/json"}
+        text = ""
+
+        def __init__(self, status_code, obj):
+            self.status_code = status_code
+            self.obj = obj
+            self.text = json.dumps(obj)
+
+        def json(self):
+            return self.obj
+
+    class DummyClient:
+        authorizations = []
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            self.authorizations.append(kwargs["headers"]["Authorization"])
+            if len(self.authorizations) == 1:
+                return DummyResponse(400, {"error": {"type": "invalid_request", "code": "cyber_policy", "message": CYBER_POLICY_ERROR_MESSAGE}})
+            return DummyResponse(200, {"id": "resp_ok"})
+
+    _configure_test_key_pool(monkeypatch, settings, "sk-json-1", ["sk-json-2"])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(upstream_client.httpx, "AsyncClient", DummyClient)
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(upstream_client.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(upstream_client.normal_forward_json({"model": "gpt-test", "input": "hello"}))
+    assert result == {"id": "resp_ok"}
+    assert DummyClient.authorizations == ["Bearer sk-json-1", "Bearer sk-json-2"]
+    assert sleeps == [600]
+
+
+
+def test_execute_bill015_does_not_rotate_on_http_rephrase_without_cyber_policy(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.models import NormalizedRequest
+
+    marker = "If this seems wrong, try rephrasing your request"
+    success_lines = [
+        'event: response.output_item.added',
+        'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"emit_value"}}',
+        '',
+        'event: response.function_call_arguments.done',
+        'data: {"type":"response.function_call_arguments.done","arguments":"{\\"mode\\":\\"answer\\",\\"answer\\":\\"HTTP OK\\",\\"tool_calls\\":[]}"}',
+        '',
+    ]
+
+    class DummyStreamResponse:
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aread(self):
+            return json.dumps({"error": {"message": marker}}).encode()
+
+        async def aiter_lines(self):
+            for line in success_lines:
+                yield line
+
+        async def aclose(self):
+            return None
+
+    class DummyClient:
+        authorizations = []
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            self.authorizations.append(kwargs["headers"]["Authorization"])
+            return DummyStreamResponse(400 if len(self.authorizations) == 1 else 200)
+
+    _configure_test_key_pool(monkeypatch, settings, "sk-rephrase-http-1", ["sk-rephrase-http-2"])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(settings, "upstream_retries", 0)
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="x", want_stream=False, client_api="responses", is_primary_path=True)
+
+    with __import__("pytest").raises(HTTPException):
+        asyncio.run(upstream.execute_bill015(n, "exploit"))
+    assert DummyClient.authorizations == ["Bearer sk-rephrase-http-1"]
+
+
+def test_execute_bill015_does_not_rotate_on_sse_rephrase_without_cyber_policy(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.models import NormalizedRequest
+
+    marker = "If this seems wrong, try rephrasing your request"
+    error_lines = [
+        'event: error',
+        json.dumps({"type": "error", "error": {"message": marker}}).join(["data: ", ""]),
+        '',
+    ]
+    success_lines = [
+        'event: response.output_item.added',
+        'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"emit_value"}}',
+        '',
+        'event: response.function_call_arguments.done',
+        'data: {"type":"response.function_call_arguments.done","arguments":"{\\"mode\\":\\"answer\\",\\"answer\\":\\"SSE OK\\",\\"tool_calls\\":[]}"}',
+        '',
+    ]
+
+    class DummyStreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            for line in self.lines:
+                yield line
+
+        async def aclose(self):
+            return None
+
+    class DummyClient:
+        authorizations = []
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            self.authorizations.append(kwargs["headers"]["Authorization"])
+            return DummyStreamResponse(error_lines if len(self.authorizations) == 1 else success_lines)
+
+    _configure_test_key_pool(monkeypatch, settings, "sk-rephrase-sse-1", ["sk-rephrase-sse-2"])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(settings, "upstream_retries", 0)
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="x", want_stream=False, client_api="responses", is_primary_path=True)
+
+    with __import__("pytest").raises(HTTPException):
+        asyncio.run(upstream.execute_bill015(n, "exploit"))
+    assert DummyClient.authorizations == ["Bearer sk-rephrase-sse-1"]
+
+
+def test_bill015_payload_passes_client_reasoning_through(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "reasoning_effort", "")
+    monkeypatch.setattr(settings, "reasoning_summary", "")
+    n = normalize_responses_request({"model": "gpt-5.5", "input": "hello", "reasoning": {"effort": "high", "summary": "auto"}})
+
+    payload = build_bill015_payload(n)
+
+    assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
+
+
+def test_bill015_payload_maps_top_level_reasoning_effort_to_responses_reasoning(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_chat_request, normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "reasoning_effort", "")
+    monkeypatch.setattr(settings, "reasoning_summary", "")
+
+    responses_request = normalize_responses_request(
+        {"model": "gpt-5.5", "input": "hello", "reasoning_effort": "medium", "reasoning_summary": "auto"}
+    )
+    chat_request = normalize_chat_request(
+        {"model": "gpt-5.5", "messages": [{"role": "user", "content": "hello"}], "reasoning_effort": "high"}
+    )
+
+    assert build_bill015_payload(responses_request)["reasoning"] == {"effort": "medium", "summary": "auto"}
+    assert build_bill015_payload(chat_request)["reasoning"] == {"effort": "high"}
+
+
+def test_context_compaction_preserves_latest_user_and_tool_batch():
+    from app.context_compaction import compact_payload_history, payload_input_tokens
+
+    payload = {
+        "model": "gpt-test",
+        "instructions": "root",
+        "input": [
+            {"type": "message", "role": "user", "content": "OLD " * 40000},
+            {"type": "function_call", "call_id": "call_latest", "name": "shell_command", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_latest", "output": "LATEST_TOOL_OUTPUT " + ("x" * 20000)},
+            {"type": "message", "role": "user", "content": "CURRENT_REQUEST"},
+        ],
+        "tools": [],
+    }
+    compacted, removed, clipped = compact_payload_history(payload, 12000, latest_tool_output_max_chars=6000)
+    dumped = json.dumps(compacted, ensure_ascii=False)
+    assert payload_input_tokens(compacted) < payload_input_tokens(payload)
+    assert removed > 0 or clipped > 0
+    assert "CURRENT_REQUEST" in dumped
+    assert "call_latest" in dumped
+    assert "LATEST_TOOL_OUTPUT" in dumped
+    assert "CONTEXT CHECKPOINT COMPACTION" in dumped
+    summary_items = [
+        item
+        for item in compacted["input"]
+        if isinstance(item, dict) and "CONTEXT CHECKPOINT COMPACTION" in json.dumps(item, ensure_ascii=False)
+    ]
+    assert summary_items
+    assert summary_items[0]["role"] == "user"
+    assert summary_items[0]["content"][0]["type"] == "input_text"
+
+
+def test_context_compaction_aggressive_clips_oversized_latest_user():
+    from app.context_compaction import compact_payload_history, payload_input_tokens
+
+    payload = {
+        "model": "gpt-test",
+        "instructions": "root",
+        "input": [
+            {"type": "message", "role": "user", "content": "old context " * 30000},
+            {"type": "message", "role": "user", "content": "CURRENT_HEAD " + ("x" * 220000) + " CURRENT_TAIL"},
+        ],
+        "tools": [],
+    }
+
+    compacted, removed, clipped = compact_payload_history(payload, 8000, aggressive=True)
+    dumped = json.dumps(compacted, ensure_ascii=False)
+
+    assert removed > 0
+    assert clipped > 0
+    assert payload_input_tokens(compacted) <= 8000
+    assert "CURRENT_HEAD" in dumped
+    assert "CURRENT_TAIL" in dumped
+    assert "local compaction omitted" in dumped
+
+
+def test_context_length_error_matcher():
+    from app.upstream_errors import is_context_length_exceeded
+
+    assert is_context_length_exceeded({"type": "error", "error": {"code": "context_length_exceeded"}})
+    assert is_context_length_exceeded('data: {"type":"error","error":{"code":"context_length_exceeded"}}\n\n')
+    assert not is_context_length_exceeded({"type": "error", "error": {"code": "bad_request"}})
+
+
+def test_execute_bill015_recovers_args_done_timeout(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.models import NormalizedRequest
+
+    success_lines = [
+        'event: response.output_item.added',
+        'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"emit_value"}}',
+        '',
+        'event: response.function_call_arguments.done',
+        'data: {"type":"response.function_call_arguments.done","arguments":"{\\"mode\\":\\"answer\\",\\"answer\\":\\"RECOVERED\\",\\"tool_calls\\":[]}"}',
+        '',
+    ]
+
+    class DummyStreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            for line in self.lines:
+                yield line
+
+        async def aclose(self):
+            return None
+
+    class DummyClient:
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            DummyClient.calls += 1
+            first_attempt_lines = [
+                'event: response.output_item.added',
+                'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"emit_value"}}',
+                '',
+            ]
+            return DummyStreamResponse(first_attempt_lines if DummyClient.calls == 1 else success_lines)
+
+    _configure_test_key_pool(monkeypatch, settings, "sk-timeout-1", [])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(settings, "stream_recovery_retries", 1)
+    monkeypatch.setattr(settings, "upstream_retry_backoff_ms", 0)
+    deadlines = iter([0.0, None])
+    monkeypatch.setattr(upstream, "_args_done_deadline", lambda cfg=settings: next(deadlines))
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="x", want_stream=False, client_api="responses", is_primary_path=True)
+    result = asyncio.run(upstream.execute_bill015(n, "exploit"))
+
+    assert DummyClient.calls == 2
+    assert result.answer == "RECOVERED"
+    assert result.stream_timeout_retry_count == 1
+    assert "args_done_timeout_retry:1" in result.retry_reasons
+
+
+def test_execute_bill015_recovers_midstream_readtimeout(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.models import NormalizedRequest
+
+    success_lines = [
+        'event: response.output_item.added',
+        'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"emit_value"}}',
+        '',
+        'event: response.function_call_arguments.done',
+        'data: {"type":"response.function_call_arguments.done","arguments":"{\\"mode\\":\\"answer\\",\\"answer\\":\\"READ OK\\",\\"tool_calls\\":[]}"}',
+        '',
+    ]
+
+    class DummyStreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        def __init__(self, fail):
+            self.fail = fail
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            if self.fail:
+                yield 'event: response.output_item.added'
+                yield 'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"emit_value"}}'
+                yield ''
+                raise upstream.httpx.ReadTimeout("simulated idle upstream")
+            for line in success_lines:
+                yield line
+
+        async def aclose(self):
+            return None
+
+    class DummyClient:
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            DummyClient.calls += 1
+            return DummyStreamResponse(fail=DummyClient.calls == 1)
+
+    _configure_test_key_pool(monkeypatch, settings, "sk-readtimeout-1", [])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(settings, "stream_recovery_retries", 1)
+    monkeypatch.setattr(settings, "upstream_retry_backoff_ms", 0)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+
+    n = NormalizedRequest(model="gpt-test", instructions="", user_input="x", want_stream=False, client_api="responses", is_primary_path=True)
+    result = asyncio.run(upstream.execute_bill015(n, "exploit"))
+
+    assert DummyClient.calls == 2
+    assert result.answer == "READ OK"
+    assert result.stream_timeout_retry_count == 1
+    assert "ReadTimeout_retry:1" in result.retry_reasons
+
+
+def test_reinforce_final_action_for_reasoning_only_retry():
+    from app.context_compaction import reinforce_final_action
+
+    payload = reinforce_final_action({"instructions": "base", "input": []})
+    assert "immediately call the required final/action tool" in payload["instructions"]

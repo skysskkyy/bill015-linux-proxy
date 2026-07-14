@@ -7,10 +7,13 @@
   },
   "upstream": {
     "base_url": "https://packyapi.com",
-    "api_key": "PASTE_YOUR_KEY_HERE",
+    "api_key": "PASTE_YOUR_PRIMARY_KEY_HERE",
+    "api_keys": [
+      "PASTE_ADDITIONAL_KEY_HERE"
+    ],
     "cookie": "",
     "user_id": "192833",
-    "timeout_seconds": 300
+    "timeout_seconds": 900
   },
   "mode": "exploit",
   "model": {
@@ -65,10 +68,11 @@
     "max_request_bytes": 1048576,
     "upstream_retries": 0,
     "upstream_retry_backoff_ms": 700,
-    "args_done_timeout_ms": 300000,
-    "upstream_idle_timeout_ms": 180000,
+    "args_done_timeout_ms": 900000,
+    "upstream_idle_timeout_ms": 900000,
     "circuit_failures": 0,
-    "client_heartbeat_interval_ms": 5000
+    "client_heartbeat_interval_ms": 5000,
+    "stream_recovery_retries": 2
   },
   "admin": {
     "token": "change-me-local-admin"

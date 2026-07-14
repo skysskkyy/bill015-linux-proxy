@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Any
 
 from .config import Settings, settings
@@ -72,6 +74,15 @@ def _normal_input_items(n: NormalizedRequest) -> list[dict[str, str]]:
                 if text:
                     items.append({"role": "user", "content": text})
                 continue
+            if str(item.get("type") or "") in {"additional_tools", "additionalTools"}:
+                # Codex Responses Lite carries the tool definitions as a
+                # developer input item.  The bridge extracts those into its
+                # catalog/registry in normalization, then exposes exactly one
+                # upstream tool (emit_value).  Replaying the raw additional
+                # tools item here is duplicate model context and can make the
+                # upstream think it should call native tools directly instead
+                # of using the bridge contract.
+                continue
             items.append(_strip_nullish(item))
         if items:
             return _normalize_native_history_items(items)
@@ -105,6 +116,7 @@ def _normalize_native_history_items(items: list[dict[str, Any]]) -> list[dict[st
     for item in normalized:
         typ = str(item.get("type") or "message")
         call_id = str(item.get("call_id") or "")
+        item = _normalize_upstream_item_id(item, typ)
         if typ == "message" and _is_local_proxy_noise_message(item):
             continue
         if typ == "function_call_output" and call_id and call_id not in call_ids["function_call"]:
@@ -123,6 +135,37 @@ def _normalize_native_history_items(items: list[dict[str, Any]]) -> list[dict[st
         elif typ == "tool_search_call" and call_id and call_id not in output_ids["tool_search_call"]:
             out.append({"type": "tool_search_output", "call_id": call_id, "status": "completed", "execution": "client", "tools": []})
     return out
+
+
+_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _normalize_upstream_item_id(item: dict[str, Any], typ: str) -> dict[str, Any]:
+    """Fix historical tool-call item ids before replaying them upstream.
+
+    Native Codex history can contain local item ids such as ``item_*`` on
+    ``function_call`` entries. The upstream Responses API rejects those for
+    function-call input items and requires an ``fc_*`` id. Tool outputs link by
+    ``call_id``, so rewriting the item id is safe and keeps the transcript
+    replayable.
+    """
+    required_prefixes = {
+        "function_call": "fc_",
+        "local_shell_call": "fc_",
+    }
+    prefix = required_prefixes.get(typ)
+    if not prefix:
+        return item
+    current = str(item.get("id") or "")
+    if current.startswith(prefix):
+        return item
+    basis = str(item.get("call_id") or current or item.get("name") or typ)
+    safe = _SAFE_ID_RE.sub("_", basis).strip("_")
+    if not safe:
+        safe = hashlib.sha256(repr(sorted(item.items())).encode("utf-8", errors="replace")).hexdigest()[:24]
+    fixed = dict(item)
+    fixed["id"] = prefix + safe.removeprefix(prefix)[:64]
+    return fixed
 
 
 def _is_local_proxy_noise_message(item: dict[str, Any]) -> bool:
@@ -196,13 +239,18 @@ def build_emit_value_schema(
     cfg: Settings = settings,
     tool_registry: dict[str, dict[str, Any]] | None = None,
     allow_discovery: bool = True,
+    bridge_target: str = "desktop",
 ) -> dict[str, Any]:
-    has_registry = bool(tool_registry)
-    discovery_only = allow_discovery and not has_registry and not cfg.tool_bridge_allow_unknown_tools
-    can_call_tools = has_registry or cfg.tool_bridge_allow_unknown_tools or discovery_only
+    concrete_tool_registry = _concrete_tool_registry_for_bridge(tool_registry, bridge_target=bridge_target)
+    has_registry = bool(concrete_tool_registry)
+    # Codex TUI rejects dynamic/client-side discovery calls with:
+    # "Dynamic tool calls are not available in TUI yet."  The bridge must only
+    # emit concrete tools already present in the native registry.
+    can_call_tools = has_registry or cfg.tool_bridge_allow_unknown_tools
     tool_call_item_schema = build_typed_tool_call_schema(
-        tool_registry,
+        concrete_tool_registry,
         allow_generic_fallback=cfg.tool_bridge_allow_unknown_tools and not tool_registry,
+        include_dynamic_tools=str(bridge_target or "").lower() not in {"tui", "cli", "terminal"},
     )
     tool_calls_schema: dict[str, Any] = {
         "type": "array",
@@ -216,12 +264,6 @@ def build_emit_value_schema(
             "description": "No local tools are registered for this turn; return mode=answer and tool_calls=[].",
             "items": tool_call_item_schema,
         }
-    elif discovery_only:
-        tool_calls_schema["description"] = (
-            "No concrete local tools are registered yet. The only valid tool_call is "
-            "type='tool_search', name='tool_search', arguments='{\"query\":\"...\",\"limit\":8}', input=''. "
-            "Do not request shell_command/apply_patch/MCP directly until a later tool_search_output exposes them."
-        )
     return {
         "type": "function",
         "name": cfg.function_name,
@@ -355,7 +397,7 @@ def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = setti
         "max_output_tokens": max_tokens,
         "instructions": instructions,
         "input": input_items,
-        "tools": [build_emit_value_schema(cfg, {}, allow_discovery=False)],
+        "tools": [build_emit_value_schema(cfg, {}, allow_discovery=False, bridge_target="tui")],
         "tool_choice": {"type": "function", "name": cfg.function_name},
         "parallel_tool_calls": False,
         "text": {"verbosity": "low"},
@@ -382,6 +424,30 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
     return build_emit_value_payload(n, cfg, max_tokens)
 
 
+def _concrete_tool_registry_for_bridge(
+    tool_registry: dict[str, dict[str, Any]] | None,
+    *,
+    bridge_target: str = "desktop",
+) -> dict[str, dict[str, Any]]:
+    """Return tools that the current Codex surface can replay.
+
+    Preserve native Desktop behavior by keeping ``tool_search``/``web_search``
+    when the client registry exposes them.  Only the CLI/TUI path filters these
+    dynamic client-side discovery items, because that surface rejects
+    ``tool_search_call``/``web_search_call`` output items.
+    """
+    if not tool_registry:
+        return {}
+    if str(bridge_target or "").lower() not in {"tui", "cli", "terminal"}:
+        return tool_registry
+    return {
+        alias: spec
+        for alias, spec in tool_registry.items()
+        if isinstance(spec, dict)
+        and str(spec.get("raw_type") or spec.get("call_type") or "function") not in {"tool_search", "web_search"}
+    }
+
+
 def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max_tokens: int | None = None) -> dict[str, Any]:
     if max_tokens is None:
         max_tokens = n.max_output_tokens or cfg.max_output_tokens
@@ -403,7 +469,6 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
         "Custom/FREEFORM tool such as apply_patch: type='custom', input=raw payload, arguments='{}'. "
         "When editing workspace files and apply_patch is available, prefer apply_patch over shell/PowerShell/Node/Python file writes so Codex can render native file-edit UI and reviewable patches. "
         "Use shell commands for inspection/build/test, not for routine text edits unless apply_patch is unavailable or the edit is generated binary/non-text data. "
-        "tool_search: type='tool_search', name='tool_search', arguments='{\"query\":\"...\",\"limit\":8}'. "
         "Parallel independent tool calls are allowed. After tool results appear in a later turn, inspect them first, then answer or request the next tool call."
         "\n\nExamples for the function arguments you must produce:"
         "\n- Final: {\"mode\":\"answer\",\"answer\":\"OK\",\"tool_calls\":[]}"
@@ -411,21 +476,28 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
         "\n- Patch: {\"mode\":\"tool_call\",\"answer\":\"I found the narrow fix and will patch it now.\",\"tool_calls\":[{\"type\":\"custom\",\"namespace\":\"\",\"name\":\"apply_patch\",\"arguments\":\"{}\",\"input\":\"*** Begin Patch\\n...\\n*** End Patch\"}]}"
     )
     instructions = _append_common_context(instructions, n)
+    bridge_target = getattr(n, "tool_bridge_target", "desktop")
+    is_tui_bridge = str(bridge_target or "").lower() in {"tui", "cli", "terminal"}
     if n.tools_catalog:
         instructions += (
             "\n\nCodex native tool catalog for this turn (lossless JSON; use exact names/namespaces from here; local proxy validates requested tools against this registry):\n"
             + n.tools_catalog
             + "\n\nFile-edit policy: if the catalog includes apply_patch and the task is to modify text/source/config files, call apply_patch directly with a minimal patch. Do not call shell_command, node_repl, or PowerShell just to write those files. If apply_patch fails, inspect the error and retry once with corrected patch grammar before falling back."
-            + "\n\nIf a needed browser/computer/plugin/MCP tool is not listed directly but tool_search is listed, request tool_search first with a broad query. Do not repeat tool_search once tool_search_output has exposed a suitable exact tool; call the exposed exact tool or answer from the latest result. For browser/session work prefer queries containing: playwright browser navigate evaluate tabs network requests cookies localStorage sessionStorage DOM JavaScript; chrome browser current tab cookies localStorage; node_repl js; jshook call_tool route_tool activate_tools hook network intercept memory. For any namespace entry, prefer its native_call fields over a flattened name."
+            + (
+                "\n\nDo not request tool_search/web_search/dynamic tools from the TUI bridge; Codex TUI cannot execute dynamic tool calls. If a needed browser/computer/plugin/MCP tool is not listed directly, explain that the tool must be exposed by the active Codex tool registry after reconnect/restart instead of emitting a discovery tool call. For any namespace entry, prefer its native_call fields over a flattened name."
+                if is_tui_bridge
+                else "\n\nIf the catalog exposes tool_search/web_search, those are native client-side discovery tools; use them only when a needed local/MCP/plugin tool is not already listed. For any namespace entry, prefer its native_call fields over a flattened name."
+            )
         )
     else:
         instructions += (
             "\n\nNo concrete Codex local tool catalog is registered in this request yet. "
             "If the user asks for terminal/files/browser/tools, do not claim tools are unavailable. "
-            "Request a native tool discovery call instead: mode='tool_call', tool_calls=[{"
-            "\"type\":\"tool_search\",\"namespace\":\"\",\"name\":\"tool_search\","
-            "\"arguments\":\"{\\\"query\\\":\\\"PowerShell shell_command terminal files browser local tools\\\",\\\"limit\\\":8}\",\"input\":\"\"}]. "
-            "After tool_search_output arrives in the next turn, use the exposed exact tool names."
+            + (
+                "Return mode='answer' explaining which concrete MCP/local tool is missing and ask the user to reconnect/restart Codex or expose it in the registry. Do not emit tool_search/web_search/dynamic tool calls from the TUI bridge."
+                if is_tui_bridge
+                else "If you need a local/MCP/plugin capability, answer that the client did not send a concrete tool registry for this turn; do not invent tool names."
+            )
         )
     payload: dict[str, Any] = {
         "model": n.model,
@@ -434,7 +506,7 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
         "max_output_tokens": max_tokens,
         "instructions": instructions,
         "input": _normal_input_items(n),
-        "tools": [build_emit_value_schema(cfg, n.tool_registry)],
+        "tools": [build_emit_value_schema(cfg, n.tool_registry, bridge_target=bridge_target)],
         "tool_choice": {"type": "function", "name": cfg.function_name},
         # Native Codex may enable provider-level parallel tool calls when it
         # exposes many tools directly.  The bridge exposes exactly one upstream

@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .audit import audit_logger
 from .chat_events import chat_json, chat_sse_generator
 from .config import settings
+from .key_pool import upstream_key_pool
 from .models import Bill015Result, NormalizedRequest, local_response_id
 from .normalization import normalize_chat_request, normalize_responses_request, request_needs_passthrough, sanitize_unsupported_image_inputs
 from .response_events import response_json, responses_sse_generator
@@ -136,6 +137,7 @@ async def healthz() -> dict[str, Any]:
         "strict_zero": settings.strict_zero,
         "config_warnings": getattr(settings, "config_warnings", []),
         "metrics": runtime_state.snapshot(),
+        "upstream_keys": upstream_key_pool(settings).snapshot(),
     }
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from http import HTTPStatus
 from typing import Any
@@ -8,6 +9,13 @@ from typing import Any
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _WS_RE = re.compile(r"\s+")
+CYBER_POLICY_ERROR_CODE = "cyber_policy"
+CYBER_POLICY_ERROR_MESSAGE = (
+    "This content was flagged for possible cybersecurity risk. "
+    "If this seems wrong, try rephrasing your request. "
+    "To get authorized for security work, join the Trusted Access for Cyber program: "
+    "https://chatgpt.com/cyber"
+)
 
 
 def _reason_phrase(status: int) -> str:
@@ -92,6 +100,84 @@ def sanitize_upstream_error_detail(
         detail["content_type"] = content_type
     return detail
 
+
+def _decode_json_or_sse_values(value: bytes | str) -> list[Any]:
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    try:
+        return [json.loads(text)]
+    except Exception:
+        values: list[Any] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                values.append(json.loads(payload))
+            except Exception:
+                continue
+        return values
+
+
+def _normalize_message(value: Any) -> str:
+    return _WS_RE.sub(" ", str(value or "")).strip()
+
+
+def _is_cyber_policy_error_object(value: dict[str, Any]) -> bool:
+    """Match the upstream cyber-policy error shape observed in audit logs.
+
+    Logs show SSE error objects like:
+    ``{"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"..."}}``.
+    Generic sequence numbers or generic rephrase text must not trigger key rotation.
+    """
+    code = str(value.get("code") or "").strip().lower()
+    message = _normalize_message(value.get("message"))
+    return code == CYBER_POLICY_ERROR_CODE and message == CYBER_POLICY_ERROR_MESSAGE
+
+
+def is_cyber_policy_rotation_error(value: Any) -> bool:
+    if isinstance(value, (bytes, str)):
+        return any(is_cyber_policy_rotation_error(item) for item in _decode_json_or_sse_values(value))
+    if isinstance(value, list):
+        return any(is_cyber_policy_rotation_error(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+
+    err = value.get("error")
+    if isinstance(err, dict) and _is_cyber_policy_error_object(err):
+        typ = str(value.get("type") or "").lower()
+        return typ in {"", "error", "response.failed", "failed"} or "response" not in value
+
+    response = value.get("response")
+    if isinstance(response, dict):
+        response_error = response.get("error")
+        if isinstance(response_error, dict) and _is_cyber_policy_error_object(response_error):
+            typ = str(value.get("type") or "").lower()
+            return typ in {"response.failed", "failed", "error"}
+
+    return _is_cyber_policy_error_object(value)
+
+
+def key_rotation_error_reason(value: Any) -> str | None:
+    """Return the configured key-rotation reason for an upstream error payload."""
+    return CYBER_POLICY_ERROR_CODE if is_cyber_policy_rotation_error(value) else None
+
+def is_context_length_exceeded(value: Any) -> bool:
+    if isinstance(value, (bytes, str)):
+        parsed = _decode_json_or_sse_values(value)
+        if parsed:
+            return any(is_context_length_exceeded(item) for item in parsed)
+        text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+        return "context_length_exceeded" in text.lower()
+    if isinstance(value, list):
+        return any(is_context_length_exceeded(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if str(value.get("code") or "").lower() == "context_length_exceeded":
+        return True
+    return any(is_context_length_exceeded(item) for item in value.values())
 
 def error_message_from_detail(detail: Any) -> str:
     if isinstance(detail, dict):

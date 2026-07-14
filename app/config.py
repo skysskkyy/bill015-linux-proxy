@@ -112,6 +112,7 @@ class Settings:
     upstream_base_url: str = field(default_factory=lambda: _env_str("PACKY_BASE_URL", "upstream.base_url", "https://packyapi.com").rstrip("/"))
     upstream_api_key_env: str = field(default_factory=lambda: _env_str("PACKY_API_KEY_ENV", "upstream.api_key_env", "PACKY_API_KEY"))
     upstream_api_key_file_value: str = field(default_factory=lambda: _env_str("", "upstream.api_key", ""))
+    upstream_api_keys_file_value: list[str] = field(default_factory=lambda: _cfg_list("upstream.api_keys", []))
     default_model: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_MODEL", "model.default", "gpt-5.5"))
     model_aliases: Dict[str, str] = field(default_factory=lambda: _cfg_dict("model.aliases", {"codex-gpt55": "gpt-5.5", "codex-gpt54": "gpt-5.4"}))
     force_default_model: bool = field(default_factory=lambda: _env_bool("LOCAL_PROXY_FORCE_DEFAULT_MODEL", "model.force_default", False))
@@ -130,11 +131,18 @@ class Settings:
     max_request_bytes: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_REQUEST_BYTES", "limits.max_request_bytes", 1048576))
     max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 2))
     # 0 means disabled/infinite. Positive values are enforced by upstream.py.
-    upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 300.0))
+    upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 900.0))
     upstream_retries: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRIES", "limits.upstream_retries", 0))
     upstream_retry_backoff_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRY_BACKOFF_MS", "limits.upstream_retry_backoff_ms", 700))
-    args_done_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_ARGS_DONE_TIMEOUT_MS", "limits.args_done_timeout_ms", 300000))
-    upstream_idle_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_IDLE_TIMEOUT_MS", "limits.upstream_idle_timeout_ms", 180000))
+    context_window_tokens: int = field(default_factory=lambda: _env_int("BILL015_CONTEXT_WINDOW_TOKENS", "limits.context_window_tokens", 128000))
+    auto_compact_percent: int = field(default_factory=lambda: _env_int("BILL015_AUTO_COMPACT_PERCENT", "limits.auto_compact_percent", 90))
+    compact_target_percent: int = field(default_factory=lambda: _env_int("BILL015_COMPACT_TARGET_PERCENT", "limits.compact_target_percent", 75))
+    context_recovery_retries: int = field(default_factory=lambda: _env_int("BILL015_CONTEXT_RECOVERY_RETRIES", "limits.context_recovery_retries", 3))
+    empty_stream_retries: int = field(default_factory=lambda: _env_int("BILL015_EMPTY_STREAM_RETRIES", "limits.empty_stream_retries", 2))
+    stream_recovery_retries: int = field(default_factory=lambda: _env_int("BILL015_STREAM_RECOVERY_RETRIES", "limits.stream_recovery_retries", 2))
+    latest_tool_output_max_chars: int = field(default_factory=lambda: _env_int("BILL015_LATEST_TOOL_OUTPUT_MAX_CHARS", "limits.latest_tool_output_max_chars", 12000))
+    args_done_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_ARGS_DONE_TIMEOUT_MS", "limits.args_done_timeout_ms", 900000))
+    upstream_idle_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_IDLE_TIMEOUT_MS", "limits.upstream_idle_timeout_ms", 900000))
     client_heartbeat_interval_ms: int = field(default_factory=lambda: _env_int("BILL015_CLIENT_HEARTBEAT_INTERVAL_MS", "limits.client_heartbeat_interval_ms", 5000))
     evidence_dir: Path = field(default_factory=lambda: Path(_env_str("LOCAL_PROXY_LOG_DIR", "logging.dir", str(PROJECT_ROOT / "proxy_evidence"))))
     store_prompts: bool = field(default_factory=lambda: _env_bool("LOCAL_PROXY_STORE_PROMPTS", "logging.store_prompts", False))
@@ -163,14 +171,25 @@ class Settings:
     tool_bridge_auto_expand_search: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_AUTO_EXPAND_SEARCH", "tool_bridge.auto_expand_search", False))
 
     @property
+    def upstream_api_keys(self) -> list[str]:
+        """Return the ordered, de-duplicated API key pool.
+
+        The environment variable keeps its legacy precedence as the primary
+        key. ``upstream.api_keys`` supplies additional rotation keys.
+        """
+        env_value = os.getenv(self.upstream_api_key_env, "").strip()
+        primary = env_value or self.upstream_api_key_file_value.strip()
+        candidates = [primary, *self.upstream_api_keys_file_value]
+        return list(dict.fromkeys(key.strip() for key in candidates if key and key.strip()))
+
+    @property
     def upstream_api_key(self) -> str:
-        # Local config is the normal path now; env remains an optional override for advanced/test use.
-        return os.getenv(self.upstream_api_key_env, "") or self.upstream_api_key_file_value
+        keys = self.upstream_api_keys
+        return keys[0] if keys else ""
 
     @property
     def upstream_configured(self) -> bool:
-        return bool(self.upstream_api_key)
-
+        return bool(self.upstream_api_keys)
     def map_model(self, model: str | None) -> str:
         """Map the client-requested model for the upstream call.
 
