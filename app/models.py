@@ -36,7 +36,11 @@ class NormalizedRequest:
     tool_choice: Any = "auto"
     previous_response_id: str | None = None
     prompt_cache_key: str | None = None
+    prompt_cache_options: dict[str, Any] | None = None
+    service_tier: str | None = None
+    truncation: str | None = None
     text_config: dict[str, Any] | None = None
+    responses_lite: bool = False
     tools_summary: str = ""
     tools_catalog: str = ""
     tool_registry: dict[str, dict[str, Any]] = field(default_factory=dict)

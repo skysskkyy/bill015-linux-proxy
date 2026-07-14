@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.4] - 2026-07-15
+
+### Fixed
+- Aligned Codex Responses Lite handling with upstream Codex request shape by detecting `additional_tools`, preserving local tool discovery, and setting `reasoning.context=all_turns`.
+- Propagated Codex request controls through bridge and passthrough paths: `prompt_cache_options`, `service_tier`, and explicit `truncation`.
+- Added the Codex Responses Lite internal header for passthrough and bridge upstream calls.
+
+### Tests
+- Added regressions for Responses Lite tool catalog extraction, passthrough header propagation, and request-control preservation.
+
 ## [0.4.3] - 2026-07-13
 
 ### Fixed

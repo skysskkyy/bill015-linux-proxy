@@ -695,7 +695,7 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                 rotated_selection: ApiKeySelection | None = None
                 context_retry_requested = False
                 stream_recovery_reason: str | None = None
-                headers = upstream_auth_headers(stream=True, cfg=cfg, api_key=selection.key)
+                headers = upstream_auth_headers(stream=True, cfg=cfg, api_key=selection.key, responses_lite=n.responses_lite)
 
                 try:
                     async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=payload) as resp:

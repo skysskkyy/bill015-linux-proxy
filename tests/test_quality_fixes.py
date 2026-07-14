@@ -648,6 +648,7 @@ def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
     names = item_schema["properties"]["name"]["enum"]
 
     assert n.tool_bridge_target == "tui"
+    assert n.responses_lite is True
     assert "shell_command" in n.tool_registry
     assert "apply_patch" in n.tool_registry
     assert "tool_search" in n.tool_registry
@@ -655,6 +656,7 @@ def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
     assert "apply_patch" in names
     assert "tool_search" not in names
     assert payload["tools"][0]["parameters"]["properties"]["mode"]["enum"] == ["answer", "tool_call"]
+    assert payload["reasoning"]["context"] == "all_turns"
     assert "shell_command" in payload["instructions"]
     assert "apply_patch" in payload["instructions"]
     assert "additional_tools" not in json.dumps(payload["input"], ensure_ascii=False)
@@ -672,6 +674,56 @@ def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
     )
     assert mode == "tool_call"
     assert calls[0].name == "shell_command"
+
+
+def test_responses_lite_passthrough_sets_codex_header(monkeypatch):
+    import asyncio
+
+    from app import upstream_client
+    from app.config import settings
+
+    captured_headers = []
+
+    class DummyResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return {"id": "resp_ok"}
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            captured_headers.append(kwargs.get("headers", {}))
+            return DummyResponse()
+
+    monkeypatch.setattr(settings, "upstream_api_key_file_value", "sk-test")
+    monkeypatch.setattr(settings, "upstream_api_keys_file_value", [])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(upstream_client.httpx, "AsyncClient", DummyClient)
+
+    result = asyncio.run(
+        upstream_client.normal_forward_json(
+            {
+                "model": "gpt-test",
+                "input": [
+                    {"type": "additional_tools", "role": "developer", "tools": []},
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                ],
+            }
+        )
+    )
+
+    assert result == {"id": "resp_ok"}
+    assert captured_headers[-1]["x-openai-internal-codex-responses-lite"] == "true"
 
 
 def test_emit_value_schema_preserves_desktop_dynamic_tools(monkeypatch):
@@ -816,6 +868,9 @@ def test_bill015_payload_preserves_native_input_and_request_controls():
             ],
             "parallel_tool_calls": True,
             "prompt_cache_key": "thread-cache-key",
+            "prompt_cache_options": {"type": "ephemeral"},
+            "service_tier": "flex",
+            "truncation": "disabled",
             "client_metadata": {"thread_id": "thread_1"},
             "text": {"verbosity": "low"},
         }
@@ -829,6 +884,9 @@ def test_bill015_payload_preserves_native_input_and_request_controls():
     assert payload["parallel_tool_calls"] is False
     assert payload["include"] == ["reasoning.encrypted_content"]
     assert payload["prompt_cache_key"] == "thread-cache-key"
+    assert payload["prompt_cache_options"] == {"type": "ephemeral"}
+    assert payload["service_tier"] == "flex"
+    assert payload["truncation"] == "disabled"
     assert payload["client_metadata"] == {"thread_id": "thread_1"}
     assert payload["text"] == {"verbosity": "low"}
     assert "If asked what model you are" not in payload["instructions"]

@@ -226,13 +226,36 @@ def _strip_nullish(value: Any) -> Any:
 
 def _native_reasoning_param(n: NormalizedRequest, cfg: Settings = settings) -> dict[str, Any] | None:
     if isinstance(n.reasoning, dict):
-        return n.reasoning
+        reasoning = dict(n.reasoning)
+        if n.responses_lite:
+            reasoning.setdefault("context", "all_turns")
+        return reasoning or None
     reasoning: dict[str, Any] = {}
     if cfg.reasoning_effort:
         reasoning["effort"] = cfg.reasoning_effort
     if cfg.reasoning_summary:
         reasoning["summary"] = cfg.reasoning_summary
+    # Codex core sets reasoning.context=all_turns for Responses Lite models so
+    # reasoning survives the additional_tools-in-input request shape. Preserve
+    # that model-visible contract when this proxy detects the same shape.
+    if n.responses_lite:
+        reasoning["context"] = "all_turns"
     return reasoning or None
+
+
+def _append_request_controls(payload: dict[str, Any], n: NormalizedRequest) -> None:
+    if n.prompt_cache_key:
+        payload["prompt_cache_key"] = n.prompt_cache_key
+    if n.prompt_cache_options:
+        payload["prompt_cache_options"] = n.prompt_cache_options
+    if n.service_tier and n.service_tier != "default":
+        payload["service_tier"] = n.service_tier
+    if n.truncation:
+        payload["truncation"] = n.truncation
+    if n.text_config:
+        payload["text"] = n.text_config
+    if n.client_metadata:
+        payload["client_metadata"] = n.client_metadata
 
 
 def build_emit_value_schema(
@@ -402,10 +425,7 @@ def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = setti
         "parallel_tool_calls": False,
         "text": {"verbosity": "low"},
     }
-    if n.prompt_cache_key:
-        payload["prompt_cache_key"] = n.prompt_cache_key
-    if n.client_metadata:
-        payload["client_metadata"] = n.client_metadata
+    _append_request_controls(payload, n)
     reasoning = _native_reasoning_param(n, cfg)
     if reasoning:
         payload["reasoning"] = reasoning
@@ -516,12 +536,7 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
         "parallel_tool_calls": False,
         "include": ["reasoning.encrypted_content"],
     }
-    if n.prompt_cache_key:
-        payload["prompt_cache_key"] = n.prompt_cache_key
-    if n.text_config:
-        payload["text"] = n.text_config
-    if n.client_metadata:
-        payload["client_metadata"] = n.client_metadata
+    _append_request_controls(payload, n)
     reasoning = _native_reasoning_param(n, cfg)
     if reasoning:
         payload["reasoning"] = reasoning
@@ -572,12 +587,7 @@ def build_native_tool_first_payload(n: NormalizedRequest, cfg: Settings = settin
         "parallel_tool_calls": bool(cfg.native_parallel_tool_calls and n.parallel_tool_calls),
         "include": ["reasoning.encrypted_content"],
     }
-    if n.prompt_cache_key:
-        payload["prompt_cache_key"] = n.prompt_cache_key
-    if n.text_config:
-        payload["text"] = n.text_config
-    if n.client_metadata:
-        payload["client_metadata"] = n.client_metadata
+    _append_request_controls(payload, n)
     reasoning = _native_reasoning_param(n, cfg)
     if reasoning:
         payload["reasoning"] = reasoning

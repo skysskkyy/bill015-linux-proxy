@@ -541,6 +541,13 @@ def collect_additional_tools_from_input(value: Any) -> list[dict[str, Any]]:
     return found[-200:]
 
 
+def has_responses_lite_additional_tools(value: Any) -> bool:
+    """Return whether input uses Codex Responses Lite additional_tools."""
+    if not isinstance(value, list):
+        return False
+    return any(isinstance(item, dict) and str(item.get("type") or "") in {"additional_tools", "additionalTools"} for item in value)
+
+
 def combine_tool_catalogs(primary_tools: Any, raw_input: Any) -> tuple[str, dict[str, dict[str, Any]]]:
     additional_tools = collect_additional_tools_from_input(raw_input)
     merged_primary: Any = primary_tools
@@ -616,6 +623,24 @@ def extract_reasoning_config(body: dict[str, Any]) -> dict[str, Any] | None:
         reasoning["summary"] = body.get("reasoning_summary")
     return reasoning or None
 
+
+def _optional_string(body: dict[str, Any], key: str) -> str | None:
+    value = body.get(key)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _responses_lite_requested(body: dict[str, Any], raw_input: Any) -> bool:
+    if has_responses_lite_additional_tools(raw_input):
+        return True
+    metadata = body.get("client_metadata") if isinstance(body.get("client_metadata"), dict) else {}
+    for key in ("x-openai-internal-codex-responses-lite", "responses_lite", "use_responses_lite"):
+        value = body.get(key, metadata.get(key))
+        if value is True:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "responses_lite"}:
+            return True
+    return False
+
 def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) -> NormalizedRequest:
     model = cfg.map_model(body.get("model"))
     raw_input = body.get("input", "")
@@ -675,9 +700,13 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
         usage_estimate=usage_estimate,
         parallel_tool_calls=bool(body.get("parallel_tool_calls", not is_compaction)),
         tool_choice=body.get("tool_choice", "auto"),
-        previous_response_id=body.get("previous_response_id") if isinstance(body.get("previous_response_id"), str) else None,
-        prompt_cache_key=body.get("prompt_cache_key") if isinstance(body.get("prompt_cache_key"), str) else None,
+        previous_response_id=_optional_string(body, "previous_response_id"),
+        prompt_cache_key=_optional_string(body, "prompt_cache_key"),
+        prompt_cache_options=body.get("prompt_cache_options") if isinstance(body.get("prompt_cache_options"), dict) else None,
+        service_tier=_optional_string(body, "service_tier"),
+        truncation=_optional_string(body, "truncation"),
         text_config=body.get("text") if isinstance(body.get("text"), dict) else None,
+        responses_lite=_responses_lite_requested(body, raw_input),
         tools_summary=tools_catalog,
         tools_catalog=tools_catalog,
         tool_registry=tool_registry,
@@ -727,9 +756,13 @@ def normalize_chat_request(body: dict[str, Any], cfg: Settings = settings) -> No
         usage_estimate=usage_estimate,
         parallel_tool_calls=bool(body.get("parallel_tool_calls", True)),
         tool_choice=body.get("tool_choice", "auto"),
-        previous_response_id=body.get("previous_response_id") if isinstance(body.get("previous_response_id"), str) else None,
-        prompt_cache_key=body.get("prompt_cache_key") if isinstance(body.get("prompt_cache_key"), str) else None,
+        previous_response_id=_optional_string(body, "previous_response_id"),
+        prompt_cache_key=_optional_string(body, "prompt_cache_key"),
+        prompt_cache_options=body.get("prompt_cache_options") if isinstance(body.get("prompt_cache_options"), dict) else None,
+        service_tier=_optional_string(body, "service_tier"),
+        truncation=_optional_string(body, "truncation"),
         text_config=body.get("text") if isinstance(body.get("text"), dict) else None,
+        responses_lite=_responses_lite_requested(body, body.get("messages", [])),
         tools_summary=tools_catalog,
         tools_catalog=tools_catalog,
         tool_registry=tool_registry,

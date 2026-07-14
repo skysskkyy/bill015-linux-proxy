@@ -30,7 +30,32 @@ def http_timeout(cfg: Settings = settings) -> httpx.Timeout | None:
     return httpx.Timeout(timeout=total, connect=connect, read=read, write=total, pool=total)
 
 
-def upstream_auth_headers(*, stream: bool = False, cfg: Settings = settings, api_key: str | None = None) -> dict[str, str]:
+RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
+
+
+def request_uses_responses_lite(body: dict[str, Any]) -> bool:
+    """Mirror Codex's Responses Lite request marker for passthrough calls.
+
+    Codex core sets an internal header whenever model metadata enables
+    Responses Lite.  In the HTTP body that commonly corresponds to an
+    ``additional_tools`` developer input item, and some callers also carry an
+    explicit marker in ``client_metadata``.  Keep passthrough and bridge paths
+    aligned so upstream sees the same request class Codex intended.
+    """
+    metadata = body.get("client_metadata") if isinstance(body.get("client_metadata"), dict) else {}
+    for key in (RESPONSES_LITE_HEADER, "responses_lite", "use_responses_lite"):
+        value = body.get(key, metadata.get(key))
+        if value is True:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "responses_lite"}:
+            return True
+    raw_input = body.get("input")
+    if isinstance(raw_input, list):
+        return any(isinstance(item, dict) and str(item.get("type") or "") in {"additional_tools", "additionalTools"} for item in raw_input)
+    return False
+
+
+def upstream_auth_headers(*, stream: bool = False, cfg: Settings = settings, api_key: str | None = None, responses_lite: bool = False) -> dict[str, str]:
     headers = {
         "Authorization": "Bearer " + (api_key or cfg.upstream_api_key),
         "Content-Type": "application/json",
@@ -38,6 +63,8 @@ def upstream_auth_headers(*, stream: bool = False, cfg: Settings = settings, api
     }
     if stream:
         headers["Accept"] = "text/event-stream"
+    if responses_lite:
+        headers[RESPONSES_LITE_HEADER] = "true"
     return headers
 
 
@@ -79,8 +106,10 @@ def _passthrough_failed_events(status_code: int, detail: dict[str, Any], body: d
         "parallel_tool_calls": bool(body.get("parallel_tool_calls", True)),
         "previous_response_id": body.get("previous_response_id") if isinstance(body.get("previous_response_id"), str) else None,
         "prompt_cache_key": body.get("prompt_cache_key") if isinstance(body.get("prompt_cache_key"), str) else None,
+        "prompt_cache_options": body.get("prompt_cache_options") if isinstance(body.get("prompt_cache_options"), dict) else None,
         "prompt_cache_retention": None,
         "reasoning": body.get("reasoning") if isinstance(body.get("reasoning"), dict) else {},
+        "service_tier": body.get("service_tier") if isinstance(body.get("service_tier"), str) else None,
         "store": bool(body.get("store", False)),
         "temperature": body.get("temperature"),
         "text": body.get("text") if isinstance(body.get("text"), dict) else {"format": {"type": "text"}},
@@ -126,7 +155,7 @@ async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) 
                 async with client.stream(
                     "POST",
                     cfg.upstream_base_url + "/v1/responses",
-                    headers=upstream_auth_headers(stream=True, cfg=cfg, api_key=selection.key),
+                    headers=upstream_auth_headers(stream=True, cfg=cfg, api_key=selection.key, responses_lite=request_uses_responses_lite(body)),
                     json=prepare_passthrough_payload(body, cfg),
                 ) as resp:
                     if resp.status_code != 200:
@@ -169,7 +198,7 @@ async def normal_forward_json(body: dict[str, Any], cfg: Settings = settings) ->
         while True:
             r = await client.post(
                 cfg.upstream_base_url + "/v1/responses",
-                headers=upstream_auth_headers(cfg=cfg, api_key=selection.key),
+                headers=upstream_auth_headers(cfg=cfg, api_key=selection.key, responses_lite=request_uses_responses_lite(body)),
                 json=prepare_passthrough_payload(body, cfg),
             )
             try:
