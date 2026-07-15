@@ -19,6 +19,7 @@
 - `0.3.8` 起：因 `native_tool_first` 实测会出现上游用量记录，默认和 `strict_zero=true` 下都恢复/强制 `emit_value` 早断开策略；`native_tool_first` 仅在 `strict_zero=false` 时作为实验选项。
 - `0.3.9` 起：图片/截图输入会先被本地代理替换成“本地不支持图片输入”的文字提示再送上游，不再 strict-zero 422 或转发图片；上游未返回 `response.function_call_arguments.done` 时也会安全收尾，避免客户端断流报错。
 - `0.4.6` 起：GPT-5.6/Codex Responses Lite 仍会从客户端 `additional_tools` 提取本地工具、`tool_search` 和子智能体 schema，但在 `strict_zero=true` 时上游会被降回标准 Responses `tools`/`instructions` 的单 `emit_value` 桥接请求，并去掉 Lite header/metadata，避免进入已观测到会计费的 5.6 Lite 上游路径。
+- `0.4.7` 起：不再提示模型“每次工具调用都写一段进度文字”；普通工具调用示例默认 `answer=""`，但模型自愿返回的有用工具前说明仍会正常展示。默认并发提升到 4，并降低超大文本精确 tokenization 阈值来改善多任务长上下文速度。
 - `0.4.1` 起：支持多 API key 池；当上游错误字段为 `error.code="cyber_policy"` 且 `error.message` 为完整 cybersecurity-risk 提示时，等待 10 分钟后自动切换下一把 key 并继续原请求。
 - `0.4.2` 起：参考 Codex CLI 的上下文窗口机制，在 90% 阈值前预压缩；遇到 `context_length_exceeded` 时从最旧历史开始裁剪并重跑，同时保留最新用户请求和最新工具批次；reasoning-only 空流改为有限重试，不再伪装成成功回答。
 - 本阶段不做 Codex 配置接入

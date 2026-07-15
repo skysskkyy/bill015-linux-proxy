@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.7] - 2026-07-15
+
+### Changed
+- Removed the prompt pressure that made the upstream model write a progress/commentary sentence for every tool call; routine tool calls now use an empty `answer` in the examples while still allowing genuinely useful pre-tool text to be displayed.
+- Raised default local request concurrency from 2 to 4 and lowered the exact-tokenization ceiling from 500k to 120k chars so multiple long-context tasks spend less time contending on local tokenization.
+
+### Fixed
+- Optimized local context compaction by avoiding full payload token re-estimation after every removed history item; long histories now use item-level token deltas inside the removal loop and only re-check full payloads at key boundaries.
+
+### Verified
+- Smoke-tested `https://anpin.ai` with the supplied key using temporary config only: `gpt-5.5` and GPT-5.6 Responses-Lite-shaped requests both returned through the strict-zero bridge, with GPT-5.6 still de-Lited upstream.
+
 ## [0.4.6] - 2026-07-15
 
 ### Fixed

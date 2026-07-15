@@ -292,6 +292,10 @@ def test_emit_value_schema_is_upstream_compatible_and_tools_are_validated_locall
     assert "apply_patch" in payload["instructions"]
     assert "prefer apply_patch" in payload["instructions"]
     assert "Do not call shell_command, node_repl, or PowerShell just to write" in payload["instructions"]
+    assert "Do not write a preamble/progress sentence merely because you are calling a tool" in payload["instructions"]
+    assert "When native Codex would say a short preamble" not in payload["instructions"]
+    assert '"answer":"",' in payload["instructions"]
+    assert "genuinely useful" in payload["tools"][0]["parameters"]["properties"]["answer"]["description"]
 
     _, _, _, mode, calls = parse_function_arguments(
         '{"mode":"tool_call","answer":"","tool_calls":[{"type":"function","namespace":"","name":"shell_command","arguments":{"command":"pwd","timeout_ms":10000},"input":""}]}',

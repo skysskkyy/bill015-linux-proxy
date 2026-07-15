@@ -129,7 +129,7 @@ class Settings:
     reasoning_summary: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_SUMMARY", "reasoning.summary", ""))
     max_answer_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_ANSWER_CHARS", "bill015.max_answer_chars", 65536))
     max_request_bytes: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_REQUEST_BYTES", "limits.max_request_bytes", 1048576))
-    max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 2))
+    max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 4))
     # 0 means disabled/infinite. Positive values are enforced by upstream.py.
     upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 900.0))
     upstream_retries: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRIES", "limits.upstream_retries", 0))
@@ -157,7 +157,7 @@ class Settings:
     usage_include_tools_schema: bool = field(default_factory=lambda: _env_bool("BILL015_USAGE_INCLUDE_TOOLS_SCHEMA", "usage.include_tools_schema", True))
     usage_include_images: bool = field(default_factory=lambda: _env_bool("BILL015_USAGE_INCLUDE_IMAGES", "usage.include_images", True))
     usage_cache_ratio_default: float = field(default_factory=lambda: _env_float("BILL015_USAGE_CACHE_RATIO_DEFAULT", "usage.cache_ratio_default", 0.85))
-    usage_max_text_for_exact_tokenize: int = field(default_factory=lambda: _env_int("BILL015_USAGE_MAX_TEXT_FOR_EXACT_TOKENIZE", "usage.max_text_for_exact_tokenize", 500000))
+    usage_max_text_for_exact_tokenize: int = field(default_factory=lambda: _env_int("BILL015_USAGE_MAX_TEXT_FOR_EXACT_TOKENIZE", "usage.max_text_for_exact_tokenize", 120000))
     usage_audit_breakdown: bool = field(default_factory=lambda: _env_bool("BILL015_USAGE_AUDIT_BREAKDOWN", "usage.audit_breakdown", True))
     responses_fidelity_level: str = field(default_factory=lambda: _env_str("BILL015_RESPONSES_FIDELITY_LEVEL", "responses_events.fidelity_level", "native"))
     responses_emit_reasoning_summary: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_EMIT_REASONING_SUMMARY", "responses_events.emit_reasoning_summary", False))

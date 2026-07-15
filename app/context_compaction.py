@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .usage_estimator import estimate_request_input_tokens
+from .usage_estimator import estimate_input_items_tokens, estimate_request_input_tokens
 
 COMPACTION_SUMMARY_PREFIX = "CONTEXT CHECKPOINT COMPACTION"
 TOOL_CALL_TYPES = {"function_call", "custom_tool_call", "tool_search_call", "web_search_call", "computer_call"}
@@ -12,6 +12,15 @@ TOOL_OUTPUT_TYPES = {"function_call_output", "custom_tool_call_output", "tool_se
 
 def payload_input_tokens(payload: dict[str, Any]) -> int:
     return estimate_request_input_tokens(payload)
+
+
+def _input_items_token_estimate(items: list[Any]) -> int:
+    text_tokens, tool_history_tokens, image_tokens, reasoning_tokens = estimate_input_items_tokens(items)
+    return max(0, text_tokens + tool_history_tokens + image_tokens + reasoning_tokens)
+
+
+def _item_token_estimate(item: Any) -> int:
+    return _input_items_token_estimate([item])
 
 
 def context_threshold_tokens(context_window_tokens: int, percent: int) -> int:
@@ -134,8 +143,9 @@ def compact_payload_history(payload: dict[str, Any], target_tokens: int, *, aggr
         if replacement != item:
             items[index] = replacement
             clipped += 1
+    current_tokens = payload_input_tokens(compacted)
     removed: list[Any] = []
-    while payload_input_tokens(compacted) > target_tokens and len(items) > 1:
+    while current_tokens > target_tokens and len(items) > 1:
         user_index = _latest_user_index(items)
         tool_batch = _latest_tool_batch(items, user_index)
         protected: set[int] = set()
@@ -149,20 +159,27 @@ def compact_payload_history(payload: dict[str, Any], target_tokens: int, *, aggr
         removable = next((index for index in range(len(items)) if index not in protected and not _is_compaction_summary(items[index])), None)
         if removable is None:
             break
-        removed.extend(_remove_related_tool_items(items, removable))
+        removed_now = _remove_related_tool_items(items, removable)
+        removed.extend(removed_now)
+        current_tokens = max(0, current_tokens - sum(_item_token_estimate(item) for item in removed_now))
     if removed:
         user_index = _latest_user_index(items)
         tool_batch = _latest_tool_batch(items, user_index)
         insert_at = tool_batch[0] if tool_batch is not None else (user_index if user_index is not None else len(items))
-        items.insert(insert_at, _summary_item(removed))
-    if aggressive and payload_input_tokens(compacted) > target_tokens:
+        summary = _summary_item(removed)
+        items.insert(insert_at, summary)
+        current_tokens += _item_token_estimate(summary)
+    if aggressive:
+        current_tokens = payload_input_tokens(compacted)
+    if aggressive and current_tokens > target_tokens:
         for index, item in enumerate(list(items)):
             if _item_type(item) in TOOL_OUTPUT_TYPES:
                 replacement = _clip_large_fields(item, 2_000)
                 if replacement != item:
+                    current_tokens = max(0, current_tokens - _item_token_estimate(item) + _item_token_estimate(replacement))
                     items[index] = replacement
                     clipped += 1
-    if aggressive and payload_input_tokens(compacted) > target_tokens:
+    if aggressive and current_tokens > target_tokens:
         # Last-resort native-aligned behavior: Codex keeps recent user messages,
         # but build_compacted_history truncates them to a token budget when
         # necessary.  If the latest user request by itself is too large for the
@@ -171,12 +188,14 @@ def compact_payload_history(payload: dict[str, Any], target_tokens: int, *, aggr
         user_index = _latest_user_index(items)
         if user_index is not None:
             limit = max(4_000, min(60_000, target_tokens * 3))
-            while payload_input_tokens(compacted) > target_tokens and limit >= 4_000:
+            while current_tokens > target_tokens and limit >= 4_000:
+                old_item = items[user_index]
                 replacement = _clip_large_fields(items[user_index], limit)
-                if replacement == items[user_index]:
+                if replacement == old_item:
                     limit //= 2
                     continue
                 items[user_index] = replacement
+                current_tokens = max(0, current_tokens - _item_token_estimate(old_item) + _item_token_estimate(replacement))
                 clipped += 1
                 limit //= 2
     return compacted, len(removed), clipped

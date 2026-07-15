@@ -44,7 +44,7 @@ usage:
   include_tools_schema: true
   include_images: true
   cache_ratio_default: 0.85
-  max_text_for_exact_tokenize: 500000
+  max_text_for_exact_tokenize: 120000
   audit_breakdown: true
 
 responses_events:
@@ -66,7 +66,7 @@ tool_bridge:
   auto_expand_search: false
 
 limits:
-  max_concurrency: 2
+  max_concurrency: 4
   max_request_bytes: 1048576
   upstream_retries: 0
   upstream_retry_backoff_ms: 700
@@ -84,5 +84,3 @@ limits:
 
 admin:
   token: change-me-local-admin
-
-
