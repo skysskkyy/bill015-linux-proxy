@@ -103,6 +103,11 @@ def upstream_auth_headers(
         headers["Accept"] = "text/event-stream"
     if responses_lite:
         headers[RESPONSES_LITE_HEADER] = "true"
+    else:
+        # In strict-zero bridge mode the client may still be a Codex
+        # Responses-Lite turn, but the upstream request is intentionally
+        # de-Lited to stay on the billing-safe single emit_value path.
+        headers.pop(RESPONSES_LITE_HEADER, None)
     return headers
 
 

@@ -592,7 +592,7 @@ def test_emit_value_schema_preserves_native_tool_search_for_tui(monkeypatch):
 def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
     from app.config import settings
     from app.normalization import normalize_responses_request
-    from app.payloads import build_bill015_payload
+    from app.payloads import build_bill015_payload, use_responses_lite_upstream
     from app.tool_bridge import parse_function_arguments
 
     monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
@@ -645,28 +645,30 @@ def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
 
     n = normalize_responses_request(body)
     payload = build_bill015_payload(n)
-    assert "tools" not in payload
-    assert "instructions" not in payload
-    assert payload["input"][0]["type"] == "additional_tools"
-    assert payload["input"][0]["tools"][0]["name"] == "emit_value"
-    assert payload["input"][1]["role"] == "developer"
-    item_schema = payload["input"][0]["tools"][0]["parameters"]["properties"]["tool_calls"]["items"]
+    assert n.responses_lite is True
+    assert use_responses_lite_upstream(n, settings) is False
+    # Strict-zero still ingests Codex Responses Lite input, but does not forward
+    # the Lite wire shape/header upstream. The upstream sees the same single
+    # BILL-015 bridge function that gpt-5.5 used without quota deltas.
+    assert payload["tools"][0]["name"] == "emit_value"
+    assert "instructions" in payload
+    assert payload["input"][0]["type"] == "message"
+    assert json.dumps(payload["input"], ensure_ascii=False).count('"type": "additional_tools"') == 0
+    item_schema = payload["tools"][0]["parameters"]["properties"]["tool_calls"]["items"]
     names = item_schema["properties"]["name"]["enum"]
 
     assert n.tool_bridge_target == "tui"
-    assert n.responses_lite is True
     assert "shell_command" in n.tool_registry
     assert "apply_patch" in n.tool_registry
     assert "tool_search" in n.tool_registry
     assert "shell_command" in names
     assert "apply_patch" in names
     assert "tool_search" in names
-    assert payload["input"][0]["tools"][0]["parameters"]["properties"]["mode"]["enum"] == ["answer", "tool_call"]
-    assert payload["reasoning"]["context"] == "all_turns"
-    developer_text = payload["input"][1]["content"][0]["text"]
+    assert payload["tools"][0]["parameters"]["properties"]["mode"]["enum"] == ["answer", "tool_call"]
+    assert "context" not in payload.get("reasoning", {})
+    developer_text = payload["instructions"]
     assert "shell_command" in developer_text
     assert "apply_patch" in developer_text
-    assert json.dumps(payload["input"], ensure_ascii=False).count('"type": "additional_tools"') == 1
 
     _, _, _, mode, calls = parse_function_arguments(
         json.dumps(
@@ -683,10 +685,119 @@ def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
     assert calls[0].name == "shell_command"
 
 
+def test_responses_lite_non_strict_still_uses_codex_lite_transport(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload, use_responses_lite_upstream
+
+    monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
+    monkeypatch.setattr(settings, "strict_zero", False)
+
+    body = {
+        "model": "gpt-5.6-sol",
+        "input": [
+            {"type": "additional_tools", "role": "developer", "tools": []},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ],
+    }
+
+    n = normalize_responses_request(body)
+    payload = build_bill015_payload(n)
+
+    assert n.responses_lite is True
+    assert use_responses_lite_upstream(n, settings) is True
+    assert "tools" not in payload
+    assert "instructions" not in payload
+    assert payload["input"][0]["type"] == "additional_tools"
+    assert payload["reasoning"]["context"] == "all_turns"
+
+
+def test_execute_bill015_strict_zero_suppresses_responses_lite_upstream_header(monkeypatch):
+    from app import upstream
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+
+    captured: dict[str, object] = {}
+    success_lines = [
+        "event: response.output_item.added",
+        'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"emit_value"}}',
+        "",
+        "event: response.function_call_arguments.done",
+        'data: {"type":"response.function_call_arguments.done","arguments":"{\\"mode\\":\\"answer\\",\\"answer\\":\\"OK\\",\\"tool_calls\\":[]}"}',
+        "",
+    ]
+
+    class DummyStreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_lines(self):
+            for line in success_lines:
+                yield line
+
+        async def aclose(self):
+            captured["closed"] = True
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, *args, **kwargs):
+            captured["headers"] = kwargs["headers"]
+            captured["json"] = kwargs["json"]
+            return DummyStreamResponse()
+
+    _configure_test_key_pool(monkeypatch, settings, "sk-lite-safe", [])
+    monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.6-sol",
+            "client_metadata": {"x-openai-internal-codex-responses-lite": "true", "thread_id": "thread_1"},
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "function", "name": "shell_command", "parameters": {"type": "object", "properties": {}}}],
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            ],
+        },
+        request_headers={"x-openai-internal-codex-responses-lite": "true", "session-id": "session_1"},
+    )
+
+    result = asyncio.run(upstream.execute_bill015(n, "exploit"))
+
+    assert result.answer == "OK"
+    assert captured["closed"] is True
+    headers = captured["headers"]
+    payload = captured["json"]
+    assert "x-openai-internal-codex-responses-lite" not in {str(k).lower(): v for k, v in headers.items()}
+    assert payload["tools"][0]["name"] == "emit_value"
+    assert "instructions" in payload
+    assert payload.get("client_metadata") == {"thread_id": "thread_1"}
+    assert payload["input"][0]["type"] == "message"
+    assert json.dumps(payload["input"], ensure_ascii=False).count('"type": "additional_tools"') == 0
+
+
 def test_responses_lite_multi_agent_v1_and_v2_tools_roundtrip_on_cli(monkeypatch):
     from app.config import settings
     from app.normalization import normalize_responses_request
-    from app.payloads import build_bill015_payload
+    from app.payloads import build_bill015_payload, use_responses_lite_upstream
     from app.tool_bridge import parse_function_arguments
 
     monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
@@ -749,9 +860,11 @@ def test_responses_lite_multi_agent_v1_and_v2_tools_roundtrip_on_cli(monkeypatch
 
     n = normalize_responses_request(body)
     payload = build_bill015_payload(n)
-    names = payload["input"][0]["tools"][0]["parameters"]["properties"]["tool_calls"]["items"]["properties"]["name"]["enum"]
+    names = payload["tools"][0]["parameters"]["properties"]["tool_calls"]["items"]["properties"]["name"]["enum"]
 
     assert n.tool_bridge_target == "tui"
+    assert n.responses_lite is True
+    assert use_responses_lite_upstream(n, settings) is False
     assert "multi_agent_v1.spawn_agent" in names
     assert "wait_agent" in names
     assert "spawn_agent" in names

@@ -224,10 +224,26 @@ def _strip_nullish(value: Any) -> Any:
     return value
 
 
+def use_responses_lite_upstream(n: NormalizedRequest, cfg: Settings = settings) -> bool:
+    """Return whether the bridge should emit the Codex Responses Lite wire shape.
+
+    ``n.responses_lite`` describes the *client* request shape.  In strict-zero
+    BILL-015 mode we still ingest that shape so GPT-5.6 Codex CLI/Desktop tools
+    are discovered, but we deliberately do **not** forward the Lite transport
+    upstream.  The Lite transport/header was observed to move gpt-5.6-sol onto a
+    provider path that accounts the accepted request even when the local proxy
+    closes the stream at the tool-arguments boundary.  The billing-safe bridge
+    keeps the exact same local tool catalog inside the single synthetic
+    ``emit_value`` function and uses the standard Responses tool fields
+    upstream, matching the older gpt-5.5 strict-zero behavior.
+    """
+    return bool(n.responses_lite and not cfg.strict_zero)
+
+
 def _native_reasoning_param(n: NormalizedRequest, cfg: Settings = settings) -> dict[str, Any] | None:
     if isinstance(n.reasoning, dict):
         reasoning = dict(n.reasoning)
-        if n.responses_lite:
+        if use_responses_lite_upstream(n, cfg):
             reasoning.setdefault("context", "all_turns")
         return reasoning or None
     reasoning: dict[str, Any] = {}
@@ -238,7 +254,7 @@ def _native_reasoning_param(n: NormalizedRequest, cfg: Settings = settings) -> d
     # Codex core sets reasoning.context=all_turns for Responses Lite models so
     # reasoning survives the additional_tools-in-input request shape. Preserve
     # that model-visible contract when this proxy detects the same shape.
-    if n.responses_lite:
+    if use_responses_lite_upstream(n, cfg):
         reasoning["context"] = "all_turns"
     return reasoning or None
 
@@ -258,14 +274,39 @@ def _append_request_controls(payload: dict[str, Any], n: NormalizedRequest) -> N
         payload["client_metadata"] = n.client_metadata
 
 
-def _apply_responses_lite_transport(payload: dict[str, Any], n: NormalizedRequest) -> dict[str, Any]:
+_RESPONSES_LITE_MARKER_KEYS = {
+    "x-openai-internal-codex-responses-lite",
+    "responses_lite",
+    "use_responses_lite",
+}
+
+
+def _strip_responses_lite_markers(payload: dict[str, Any]) -> None:
+    """Remove body metadata that would re-enable Responses Lite upstream."""
+    for key in _RESPONSES_LITE_MARKER_KEYS:
+        payload.pop(key, None)
+    metadata = payload.get("client_metadata")
+    if isinstance(metadata, dict):
+        cleaned = {
+            key: value
+            for key, value in metadata.items()
+            if str(key).strip().lower() not in _RESPONSES_LITE_MARKER_KEYS
+        }
+        if cleaned:
+            payload["client_metadata"] = cleaned
+        else:
+            payload.pop("client_metadata", None)
+
+
+def _apply_responses_lite_transport(payload: dict[str, Any], n: NormalizedRequest, cfg: Settings = settings) -> dict[str, Any]:
     """Move instructions/tools into input items exactly like Codex Lite.
 
     The client-provided ``additional_tools`` item is intentionally replaced by
     the bridge's actual upstream tools, so the model sees only tools it can
     really call on this upstream request.
     """
-    if not n.responses_lite:
+    if not use_responses_lite_upstream(n, cfg):
+        _strip_responses_lite_markers(payload)
         return payload
     tools = payload.pop("tools", [])
     instructions = str(payload.pop("instructions", "") or "")
@@ -461,7 +502,7 @@ def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = setti
     reasoning = _native_reasoning_param(n, cfg)
     if reasoning:
         payload["reasoning"] = reasoning
-    return _apply_responses_lite_transport(payload, n)
+    return _apply_responses_lite_transport(payload, n, cfg)
 
 def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dict[str, Any]:
     if n.is_compaction:
@@ -557,7 +598,7 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
         payload["reasoning"] = reasoning
     if n.temperature is not None:
         payload["temperature"] = n.temperature
-    return _apply_responses_lite_transport(payload, n)
+    return _apply_responses_lite_transport(payload, n, cfg)
 
 
 def build_native_tool_first_payload(n: NormalizedRequest, cfg: Settings = settings, max_tokens: int | None = None) -> dict[str, Any]:
@@ -608,4 +649,4 @@ def build_native_tool_first_payload(n: NormalizedRequest, cfg: Settings = settin
         payload["reasoning"] = reasoning
     if n.temperature is not None:
         payload["temperature"] = n.temperature
-    return _apply_responses_lite_transport(payload, n)
+    return _apply_responses_lite_transport(payload, n, cfg)

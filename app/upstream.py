@@ -13,7 +13,7 @@ from .config import Settings, settings
 from .context_compaction import compact_payload_history, context_threshold_tokens, payload_input_tokens, reinforce_final_action
 from .key_pool import ApiKeySelection, upstream_key_pool
 from .models import Bill015Result, BridgeToolCall, NormalizedRequest, local_response_id
-from .payloads import build_bill015_payload
+from .payloads import build_bill015_payload, use_responses_lite_upstream
 from .sse import SSEEvent, parse_async_sse_lines
 from .tool_bridge import parse_function_arguments
 from .tool_history import is_repeated_successful_call
@@ -439,6 +439,8 @@ def audit_from_result(result: Bill015Result, n: NormalizedRequest, mode: str, fa
         "model": n.model,
         "original_model": n.original_model,
         "strict_zero": settings.strict_zero,
+        "responses_lite_client": n.responses_lite,
+        "responses_lite_upstream": use_responses_lite_upstream(n, settings),
         "function_call_seen": result.function_call_seen,
         "args_done_seen": result.args_done_seen,
         "upstream_completed_seen": result.upstream_completed_seen,
@@ -701,7 +703,7 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                     stream=True,
                     cfg=cfg,
                     api_key=selection.key,
-                    responses_lite=n.responses_lite,
+                    responses_lite=use_responses_lite_upstream(n, cfg),
                     client_headers=n.request_headers,
                 )
 

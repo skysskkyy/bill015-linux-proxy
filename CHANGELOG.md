@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.6] - 2026-07-15
+
+### Fixed
+- Fail-closed GPT-5.6 strict-zero bridge transport by ingesting Codex Responses Lite `additional_tools` locally but de-Liting the upstream BILL-015 request back to top-level `tools`/`instructions` with only `emit_value`.
+- Strip `x-openai-internal-codex-responses-lite`, `responses_lite`, and `use_responses_lite` from strict-zero upstream headers/body metadata so client Lite markers cannot re-enable the charged upstream route.
+- Keep non-strict/passthrough Responses Lite behavior unchanged for native Codex compatibility.
+- Added audit fields for client-vs-upstream Responses Lite state.
+
+### Tests
+- Added regressions for GPT-5.6 strict-zero de-Lite payload/header behavior while preserving CLI tool discovery and multi-agent tool schemas.
 ## [0.4.5] - 2026-07-15
 
 ### Fixed
