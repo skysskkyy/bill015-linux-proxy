@@ -277,8 +277,10 @@ def _apply_tool_arguments_result(
     result.raw_arguments = final_args
     result.args_done_seen = True
     if name == cfg.function_name or (not name and _looks_like_emit_value_arguments_loose(final_args, cfg)):
-        allow_dynamic_tools = str(getattr(n, "tool_bridge_target", "desktop")).lower() not in {"tui", "cli", "terminal"}
-        result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry, allow_dynamic_tools=allow_dynamic_tools)
+        # Native tool_search_call is executed by Codex Core on both Desktop and
+        # CLI. The TUI only rejects app-server DynamicToolCall requests, which
+        # this Responses bridge never emits.
+        result.answer, result.malformed_function_args, result.repaired_args, result.bridge_mode, result.tool_calls = parse_function_arguments(final_args, cfg, n.tool_registry, allow_dynamic_tools=True)
         return
     if name == cfg.final_answer_tool_name:
         obj, malformed = _json_object_from_text(final_args)
@@ -695,7 +697,13 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
                 rotated_selection: ApiKeySelection | None = None
                 context_retry_requested = False
                 stream_recovery_reason: str | None = None
-                headers = upstream_auth_headers(stream=True, cfg=cfg, api_key=selection.key, responses_lite=n.responses_lite)
+                headers = upstream_auth_headers(
+                    stream=True,
+                    cfg=cfg,
+                    api_key=selection.key,
+                    responses_lite=n.responses_lite,
+                    client_headers=n.request_headers,
+                )
 
                 try:
                     async with client.stream("POST", cfg.upstream_base_url + "/v1/responses", headers=headers, json=payload) as resp:

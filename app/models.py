@@ -20,6 +20,7 @@ class NormalizedRequest:
     reasoning: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
     client_metadata: dict[str, Any] | None = None
+    request_headers: dict[str, str] = field(default_factory=dict)
     original_model: str | None = None
     raw_input: Any = None
     raw_tools: Any = None

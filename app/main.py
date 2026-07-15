@@ -19,7 +19,7 @@ from .normalization import normalize_chat_request, normalize_responses_request, 
 from .response_events import response_json, responses_sse_generator
 from .state import runtime_state
 from .upstream import audit_from_result, dry_run_response, execute_bill015
-from .upstream_client import normal_forward_json, normal_forward_stream
+from .upstream_client import codex_request_headers, normal_forward_json, normal_forward_stream
 
 
 def project_version() -> str:
@@ -192,9 +192,10 @@ def _force_compaction_metadata(body: dict[str, Any]) -> dict[str, Any]:
     return body
 
 
-async def handle_responses_body(body: dict[str, Any]):
+async def handle_responses_body(body: dict[str, Any], request_headers: dict[str, str] | None = None):
     body, image_replacements = sanitize_unsupported_image_inputs(body)
-    n = normalize_responses_request(body)
+    request_headers = codex_request_headers(request_headers)
+    n = normalize_responses_request(body, request_headers=request_headers)
     mode = active_mode()
     if mode == "circuit-open":
         raise HTTPException(status_code=503, detail="circuit breaker open after consecutive upstream failures")
@@ -246,8 +247,8 @@ async def handle_responses_body(body: dict[str, Any]):
             "prompt_chars": len(n.user_input),
         })
         if n.want_stream:
-            return StreamingResponse(normal_forward_stream(body), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
-        return JSONResponse(await normal_forward_json(body))
+            return StreamingResponse(normal_forward_stream(body, request_headers=request_headers), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
+        return JSONResponse(await normal_forward_json(body, request_headers=request_headers))
 
     if mode == "normal":
         if settings.strict_zero:
@@ -266,8 +267,8 @@ async def handle_responses_body(body: dict[str, Any]):
         runtime_state.mark_fallback()
         audit_logger.write({"local_request_id": local_response_id(), "mode": "normal", "client_api": "responses", "model": n.model, "strict_zero": settings.strict_zero, "prompt_chars": len(n.user_input)})
         if n.want_stream:
-            return StreamingResponse(normal_forward_stream(body), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
-        return JSONResponse(await normal_forward_json(body))
+            return StreamingResponse(normal_forward_stream(body, request_headers=request_headers), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
+        return JSONResponse(await normal_forward_json(body, request_headers=request_headers))
 
     if n.want_stream:
         rid = local_response_id()
@@ -276,7 +277,7 @@ async def handle_responses_body(body: dict[str, Any]):
     return JSONResponse(response_json(result, n))
 
 
-async def handle_responses_compact_body(body: dict[str, Any]):
+async def handle_responses_compact_body(body: dict[str, Any], request_headers: dict[str, str] | None = None):
     """Native `/v1/responses/compact` compatibility.
 
     Upstream Codex's compact endpoint is unary JSON and returns
@@ -287,7 +288,8 @@ async def handle_responses_compact_body(body: dict[str, Any]):
     body, _image_replacements = sanitize_unsupported_image_inputs(body)
     compact_body = _force_compaction_metadata(body)
     compact_body["stream"] = False
-    n = normalize_responses_request(compact_body)
+    request_headers = codex_request_headers(request_headers)
+    n = normalize_responses_request(compact_body, request_headers=request_headers)
     mode = active_mode()
     if mode == "circuit-open":
         raise HTTPException(status_code=503, detail="circuit breaker open after consecutive upstream failures")
@@ -324,18 +326,18 @@ async def handle_responses_compact_body(body: dict[str, Any]):
 
 @app.post("/v1/responses")
 async def responses(request: Request):
-    return await handle_responses_body(await read_json_body(request))
+    return await handle_responses_body(await read_json_body(request), dict(request.headers))
 
 
 @app.post("/v1/responses/compact")
 async def responses_compact(request: Request):
-    return await handle_responses_compact_body(await read_json_body(request))
+    return await handle_responses_compact_body(await read_json_body(request), dict(request.headers))
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     body, _image_replacements = sanitize_unsupported_image_inputs(await read_json_body(request))
-    n = normalize_chat_request(body)
+    n = normalize_chat_request(body, request_headers=codex_request_headers(dict(request.headers)))
     mode = active_mode()
     if mode == "circuit-open":
         raise HTTPException(status_code=503, detail="circuit breaker open after consecutive upstream failures")

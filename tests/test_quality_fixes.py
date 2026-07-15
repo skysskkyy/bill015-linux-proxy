@@ -572,7 +572,7 @@ def test_tool_search_auto_expansion_is_disabled_by_default_but_desktop_dynamic_c
     assert calls[0].name == "tool_search"
 
 
-def test_emit_value_schema_filters_tui_dynamic_tools(monkeypatch):
+def test_emit_value_schema_preserves_native_tool_search_for_tui(monkeypatch):
     from app.config import settings
     from app.payloads import build_emit_value_schema
 
@@ -584,8 +584,9 @@ def test_emit_value_schema_filters_tui_dynamic_tools(monkeypatch):
     )
     params = schema["parameters"]["properties"]
 
-    assert params["mode"]["enum"] == ["answer"]
-    assert params["tool_calls"]["maxItems"] == 0
+    assert params["mode"]["enum"] == ["answer", "tool_call"]
+    assert "maxItems" not in params["tool_calls"]
+    assert "tool_search" in params["tool_calls"]["items"]["properties"]["name"]["enum"]
 
 
 def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
@@ -644,7 +645,12 @@ def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
 
     n = normalize_responses_request(body)
     payload = build_bill015_payload(n)
-    item_schema = payload["tools"][0]["parameters"]["properties"]["tool_calls"]["items"]
+    assert "tools" not in payload
+    assert "instructions" not in payload
+    assert payload["input"][0]["type"] == "additional_tools"
+    assert payload["input"][0]["tools"][0]["name"] == "emit_value"
+    assert payload["input"][1]["role"] == "developer"
+    item_schema = payload["input"][0]["tools"][0]["parameters"]["properties"]["tool_calls"]["items"]
     names = item_schema["properties"]["name"]["enum"]
 
     assert n.tool_bridge_target == "tui"
@@ -654,12 +660,13 @@ def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
     assert "tool_search" in n.tool_registry
     assert "shell_command" in names
     assert "apply_patch" in names
-    assert "tool_search" not in names
-    assert payload["tools"][0]["parameters"]["properties"]["mode"]["enum"] == ["answer", "tool_call"]
+    assert "tool_search" in names
+    assert payload["input"][0]["tools"][0]["parameters"]["properties"]["mode"]["enum"] == ["answer", "tool_call"]
     assert payload["reasoning"]["context"] == "all_turns"
-    assert "shell_command" in payload["instructions"]
-    assert "apply_patch" in payload["instructions"]
-    assert "additional_tools" not in json.dumps(payload["input"], ensure_ascii=False)
+    developer_text = payload["input"][1]["content"][0]["text"]
+    assert "shell_command" in developer_text
+    assert "apply_patch" in developer_text
+    assert json.dumps(payload["input"], ensure_ascii=False).count('"type": "additional_tools"') == 1
 
     _, _, _, mode, calls = parse_function_arguments(
         json.dumps(
@@ -674,6 +681,122 @@ def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
     )
     assert mode == "tool_call"
     assert calls[0].name == "shell_command"
+
+
+def test_responses_lite_multi_agent_v1_and_v2_tools_roundtrip_on_cli(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+    from app.tool_bridge import parse_function_arguments
+
+    monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(settings, "tool_bridge_allow_unknown_tools", False)
+
+    body = {
+        "model": "gpt-5.6-sol",
+        "client_metadata": {"client": "codex-cli"},
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "multi_agent_v1",
+                        "description": "Tools for spawning and managing sub-agents.",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "spawn_agent",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"message": {"type": "string"}},
+                                    "required": ["message"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            {
+                                "type": "function",
+                                "name": "wait_agent",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"targets": {"type": "array", "items": {"type": "string"}}},
+                                    "required": ["targets"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "task_name": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                            "required": ["task_name", "message"],
+                            "additionalProperties": False,
+                        },
+                    },
+                ],
+            },
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "delegate two checks"}]},
+        ],
+    }
+
+    n = normalize_responses_request(body)
+    payload = build_bill015_payload(n)
+    names = payload["input"][0]["tools"][0]["parameters"]["properties"]["tool_calls"]["items"]["properties"]["name"]["enum"]
+
+    assert n.tool_bridge_target == "tui"
+    assert "multi_agent_v1.spawn_agent" in names
+    assert "wait_agent" in names
+    assert "spawn_agent" in names
+
+    _, _, _, v1_mode, v1_calls = parse_function_arguments(
+        json.dumps(
+            {
+                "mode": "tool_call",
+                "answer": "",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "namespace": "multi_agent_v1",
+                        "name": "spawn_agent",
+                        "arguments": {"message": "inspect tools"},
+                        "input": "",
+                    }
+                ],
+            }
+        ),
+        tool_registry=n.tool_registry,
+    )
+    assert v1_mode == "tool_call"
+    assert (v1_calls[0].namespace, v1_calls[0].name) == ("multi_agent_v1", "spawn_agent")
+
+    _, _, _, v2_mode, v2_calls = parse_function_arguments(
+        json.dumps(
+            {
+                "mode": "tool_call",
+                "answer": "",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "namespace": "",
+                        "name": "spawn_agent",
+                        "arguments": {"task_name": "inspect_tools", "message": "inspect tools"},
+                        "input": "",
+                    }
+                ],
+            }
+        ),
+        tool_registry=n.tool_registry,
+    )
+    assert v2_mode == "tool_call"
+    assert (v2_calls[0].namespace, v2_calls[0].name) == (None, "spawn_agent")
 
 
 def test_responses_lite_passthrough_sets_codex_header(monkeypatch):
@@ -718,12 +841,26 @@ def test_responses_lite_passthrough_sets_codex_header(monkeypatch):
                     {"type": "additional_tools", "role": "developer", "tools": []},
                     {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
                 ],
-            }
+            },
+            request_headers={
+                "session-id": "session_1",
+                "thread-id": "thread_1",
+                "x-client-request-id": "thread_1",
+                "x-openai-subagent": "collab_spawn",
+                "x-codex-window-id": "thread_1:0",
+                "authorization": "Bearer client-secret-must-not-forward",
+            },
         )
     )
 
     assert result == {"id": "resp_ok"}
     assert captured_headers[-1]["x-openai-internal-codex-responses-lite"] == "true"
+    assert captured_headers[-1]["session-id"] == "session_1"
+    assert captured_headers[-1]["thread-id"] == "thread_1"
+    assert captured_headers[-1]["x-client-request-id"] == "thread_1"
+    assert captured_headers[-1]["x-openai-subagent"] == "collab_spawn"
+    assert captured_headers[-1]["x-codex-window-id"] == "thread_1:0"
+    assert captured_headers[-1]["Authorization"] == "Bearer sk-test"
 
 
 def test_emit_value_schema_preserves_desktop_dynamic_tools(monkeypatch):

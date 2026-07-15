@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import time
+from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
 import httpx
@@ -31,9 +32,34 @@ def http_timeout(cfg: Settings = settings) -> httpx.Timeout | None:
 
 
 RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite"
+_CODEX_HEADER_NAMES = {
+    "session-id",
+    "thread-id",
+    "x-client-request-id",
+    "originator",
+    "openai-beta",
+    "x-openai-subagent",
+    "x-openai-memgen-request",
+    "x-openai-actor-authorization",
+    "x-responsesapi-include-timing-metrics",
+    RESPONSES_LITE_HEADER,
+}
 
 
-def request_uses_responses_lite(body: dict[str, Any]) -> bool:
+def codex_request_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
+    """Keep Codex session/turn headers while dropping client credentials."""
+    out: dict[str, str] = {}
+    for raw_name, raw_value in (headers or {}).items():
+        name = str(raw_name).strip().lower()
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        if name in _CODEX_HEADER_NAMES or name.startswith("x-codex-"):
+            out[name] = value
+    return out
+
+
+def request_uses_responses_lite(body: dict[str, Any], request_headers: Mapping[str, str] | None = None) -> bool:
     """Mirror Codex's Responses Lite request marker for passthrough calls.
 
     Codex core sets an internal header whenever model metadata enables
@@ -51,16 +77,28 @@ def request_uses_responses_lite(body: dict[str, Any]) -> bool:
             return True
     raw_input = body.get("input")
     if isinstance(raw_input, list):
-        return any(isinstance(item, dict) and str(item.get("type") or "") in {"additional_tools", "additionalTools"} for item in raw_input)
+        if any(isinstance(item, dict) and str(item.get("type") or "") in {"additional_tools", "additionalTools"} for item in raw_input):
+            return True
+    value = codex_request_headers(request_headers).get(RESPONSES_LITE_HEADER, "")
+    if value.lower() in {"1", "true", "yes"}:
+        return True
     return False
 
 
-def upstream_auth_headers(*, stream: bool = False, cfg: Settings = settings, api_key: str | None = None, responses_lite: bool = False) -> dict[str, str]:
-    headers = {
+def upstream_auth_headers(
+    *,
+    stream: bool = False,
+    cfg: Settings = settings,
+    api_key: str | None = None,
+    responses_lite: bool = False,
+    client_headers: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    headers = codex_request_headers(client_headers)
+    headers.update({
         "Authorization": "Bearer " + (api_key or cfg.upstream_api_key),
         "Content-Type": "application/json",
         "User-Agent": "bill015-local-proxy/1.0",
-    }
+    })
     if stream:
         headers["Accept"] = "text/event-stream"
     if responses_lite:
@@ -141,7 +179,11 @@ async def _next_key_after_rotation_error(
     return next_selection
 
 
-async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) -> AsyncIterator[bytes]:
+async def normal_forward_stream(
+    body: dict[str, Any],
+    cfg: Settings = settings,
+    request_headers: Mapping[str, str] | None = None,
+) -> AsyncIterator[bytes]:
     selection = upstream_key_pool(cfg).current()
     if selection is None:
         yield encode_sse({"type": "error", "error": {"message": f"Missing upstream API key env {cfg.upstream_api_key_env}"}}, "error")
@@ -155,7 +197,13 @@ async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) 
                 async with client.stream(
                     "POST",
                     cfg.upstream_base_url + "/v1/responses",
-                    headers=upstream_auth_headers(stream=True, cfg=cfg, api_key=selection.key, responses_lite=request_uses_responses_lite(body)),
+                    headers=upstream_auth_headers(
+                        stream=True,
+                        cfg=cfg,
+                        api_key=selection.key,
+                        responses_lite=request_uses_responses_lite(body, request_headers),
+                        client_headers=request_headers,
+                    ),
                     json=prepare_passthrough_payload(body, cfg),
                 ) as resp:
                     if resp.status_code != 200:
@@ -188,7 +236,11 @@ async def normal_forward_stream(body: dict[str, Any], cfg: Settings = settings) 
         yield b"data: [DONE]\n\n"
 
 
-async def normal_forward_json(body: dict[str, Any], cfg: Settings = settings) -> dict[str, Any]:
+async def normal_forward_json(
+    body: dict[str, Any],
+    cfg: Settings = settings,
+    request_headers: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     selection = upstream_key_pool(cfg).current()
     if selection is None:
         raise HTTPException(status_code=500, detail=f"Missing upstream API key env {cfg.upstream_api_key_env}")
@@ -198,7 +250,12 @@ async def normal_forward_json(body: dict[str, Any], cfg: Settings = settings) ->
         while True:
             r = await client.post(
                 cfg.upstream_base_url + "/v1/responses",
-                headers=upstream_auth_headers(cfg=cfg, api_key=selection.key, responses_lite=request_uses_responses_lite(body)),
+                headers=upstream_auth_headers(
+                    cfg=cfg,
+                    api_key=selection.key,
+                    responses_lite=request_uses_responses_lite(body, request_headers),
+                    client_headers=request_headers,
+                ),
                 json=prepare_passthrough_payload(body, cfg),
             )
             try:

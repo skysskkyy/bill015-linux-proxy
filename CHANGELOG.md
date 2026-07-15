@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.5] - 2026-07-15
+
+### Fixed
+- Corrected the CLI/Desktop tool-discovery boundary: native `tool_search_call` remains available in Codex CLI, while the unsupported app-server `DynamicToolCall` path stays separate.
+- Rebuilt Responses Lite bridge requests in Codex-native shape with `additional_tools` and developer instructions in `input`, no top-level `tools`/`instructions`, `parallel_tool_calls=false`, and `reasoning.context=all_turns`.
+- Preserved Codex session, thread, window, originator, turn-state, and subagent headers without forwarding client authorization credentials.
+- Added lossless discovery and invocation coverage for multi-agent v1 namespace tools and v2 plain function tools.
+
+### Tests
+- Added regressions for GPT-5.6 Responses Lite CLI browser/tool discovery, multi-agent v1/v2 calls, Codex header forwarding, and credential replacement.
+
 ## [0.4.4] - 2026-07-15
 
 ### Fixed

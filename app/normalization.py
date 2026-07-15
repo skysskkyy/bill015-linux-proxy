@@ -629,7 +629,7 @@ def _optional_string(body: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _responses_lite_requested(body: dict[str, Any], raw_input: Any) -> bool:
+def _responses_lite_requested(body: dict[str, Any], raw_input: Any, request_headers: dict[str, str] | None = None) -> bool:
     if has_responses_lite_additional_tools(raw_input):
         return True
     metadata = body.get("client_metadata") if isinstance(body.get("client_metadata"), dict) else {}
@@ -639,9 +639,16 @@ def _responses_lite_requested(body: dict[str, Any], raw_input: Any) -> bool:
             return True
         if isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "responses_lite"}:
             return True
+    for key, value in (request_headers or {}).items():
+        if str(key).lower() == "x-openai-internal-codex-responses-lite" and str(value).strip().lower() in {"1", "true", "yes"}:
+            return True
     return False
 
-def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) -> NormalizedRequest:
+def normalize_responses_request(
+    body: dict[str, Any],
+    cfg: Settings = settings,
+    request_headers: dict[str, str] | None = None,
+) -> NormalizedRequest:
     model = cfg.map_model(body.get("model"))
     raw_input = body.get("input", "")
     usage_estimate = estimate_responses_usage_from_body(body)
@@ -706,7 +713,7 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
         service_tier=_optional_string(body, "service_tier"),
         truncation=_optional_string(body, "truncation"),
         text_config=body.get("text") if isinstance(body.get("text"), dict) else None,
-        responses_lite=_responses_lite_requested(body, raw_input),
+        responses_lite=_responses_lite_requested(body, raw_input, request_headers),
         tools_summary=tools_catalog,
         tools_catalog=tools_catalog,
         tool_registry=tool_registry,
@@ -725,9 +732,14 @@ def normalize_responses_request(body: dict[str, Any], cfg: Settings = settings) 
         reasoning=extract_reasoning_config(body),
         metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else None,
         client_metadata=body.get("client_metadata") if isinstance(body.get("client_metadata"), dict) else None,
+        request_headers=dict(request_headers or {}),
     )
 
-def normalize_chat_request(body: dict[str, Any], cfg: Settings = settings) -> NormalizedRequest:
+def normalize_chat_request(
+    body: dict[str, Any],
+    cfg: Settings = settings,
+    request_headers: dict[str, str] | None = None,
+) -> NormalizedRequest:
     instructions, user_input = flatten_chat_messages(body.get("messages", []))
     tools_catalog, tool_registry = build_client_tool_catalog(body.get("tools"))
     tool_bridge_target = detect_tool_bridge_target(body)
@@ -762,7 +774,7 @@ def normalize_chat_request(body: dict[str, Any], cfg: Settings = settings) -> No
         service_tier=_optional_string(body, "service_tier"),
         truncation=_optional_string(body, "truncation"),
         text_config=body.get("text") if isinstance(body.get("text"), dict) else None,
-        responses_lite=_responses_lite_requested(body, body.get("messages", [])),
+        responses_lite=_responses_lite_requested(body, body.get("messages", []), request_headers),
         tools_summary=tools_catalog,
         tools_catalog=tools_catalog,
         tool_registry=tool_registry,
@@ -776,4 +788,5 @@ def normalize_chat_request(body: dict[str, Any], cfg: Settings = settings) -> No
         max_output_tokens=body.get("max_tokens") or body.get("max_output_tokens"),
         reasoning=extract_reasoning_config(body),
         metadata=None,
+        request_headers=dict(request_headers or {}),
     )

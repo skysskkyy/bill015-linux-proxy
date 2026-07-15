@@ -322,8 +322,10 @@ def _tool_schema_enums(registry: dict[str, dict[str, Any]], *, max_tools: int, i
             call_type = "custom"
         elif raw_type in {"tool_search", "web_search"}:
             if not include_dynamic_tools:
-                # Codex TUI currently rejects dynamic/client-side tool calls
-                # with: "Dynamic tool calls are not available in TUI yet."
+                # This switch is retained for callers that explicitly disable
+                # native discovery. It must not be inferred merely from TUI:
+                # app-server DynamicToolCall and native tool_search_call are
+                # separate protocol paths.
                 continue
             call_type = raw_type
         key = (namespace, output_name, call_type)

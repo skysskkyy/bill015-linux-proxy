@@ -258,6 +258,35 @@ def _append_request_controls(payload: dict[str, Any], n: NormalizedRequest) -> N
         payload["client_metadata"] = n.client_metadata
 
 
+def _apply_responses_lite_transport(payload: dict[str, Any], n: NormalizedRequest) -> dict[str, Any]:
+    """Move instructions/tools into input items exactly like Codex Lite.
+
+    The client-provided ``additional_tools`` item is intentionally replaced by
+    the bridge's actual upstream tools, so the model sees only tools it can
+    really call on this upstream request.
+    """
+    if not n.responses_lite:
+        return payload
+    tools = payload.pop("tools", [])
+    instructions = str(payload.pop("instructions", "") or "")
+    current_input = payload.get("input")
+    input_items = list(current_input) if isinstance(current_input, list) else []
+    prefix: list[dict[str, Any]] = [
+        {"type": "additional_tools", "role": "developer", "tools": tools}
+    ]
+    if instructions:
+        prefix.append(
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": instructions}],
+            }
+        )
+    payload["input"] = [*prefix, *input_items]
+    payload["parallel_tool_calls"] = False
+    return payload
+
+
 def build_emit_value_schema(
     cfg: Settings = settings,
     tool_registry: dict[str, dict[str, Any]] | None = None,
@@ -273,7 +302,10 @@ def build_emit_value_schema(
     tool_call_item_schema = build_typed_tool_call_schema(
         concrete_tool_registry,
         allow_generic_fallback=cfg.tool_bridge_allow_unknown_tools and not tool_registry,
-        include_dynamic_tools=str(bridge_target or "").lower() not in {"tui", "cli", "terminal"},
+        # Native tool_search_call is handled by Codex Core on every surface.
+        # Do not confuse it with app-server DynamicToolCall, which the TUI
+        # currently rejects.
+        include_dynamic_tools=True,
     )
     tool_calls_schema: dict[str, Any] = {
         "type": "array",
@@ -429,7 +461,7 @@ def build_compaction_bill015_payload(n: NormalizedRequest, cfg: Settings = setti
     reasoning = _native_reasoning_param(n, cfg)
     if reasoning:
         payload["reasoning"] = reasoning
-    return payload
+    return _apply_responses_lite_transport(payload, n)
 
 def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dict[str, Any]:
     if n.is_compaction:
@@ -451,21 +483,13 @@ def _concrete_tool_registry_for_bridge(
 ) -> dict[str, dict[str, Any]]:
     """Return tools that the current Codex surface can replay.
 
-    Preserve native Desktop behavior by keeping ``tool_search``/``web_search``
-    when the client registry exposes them.  Only the CLI/TUI path filters these
-    dynamic client-side discovery items, because that surface rejects
-    ``tool_search_call``/``web_search_call`` output items.
+    ``tool_search_call`` is a native Responses item consumed by Codex Core on
+    both Desktop and CLI.  The TUI error "Dynamic tool calls are not available"
+    refers to app-server ``DynamicToolCall`` requests, which are a different
+    protocol surface.  Keep native tool search available whenever the current
+    request explicitly registers it.
     """
-    if not tool_registry:
-        return {}
-    if str(bridge_target or "").lower() not in {"tui", "cli", "terminal"}:
-        return tool_registry
-    return {
-        alias: spec
-        for alias, spec in tool_registry.items()
-        if isinstance(spec, dict)
-        and str(spec.get("raw_type") or spec.get("call_type") or "function") not in {"tool_search", "web_search"}
-    }
+    return tool_registry or {}
 
 
 def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max_tokens: int | None = None) -> dict[str, Any]:
@@ -497,27 +521,18 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
     )
     instructions = _append_common_context(instructions, n)
     bridge_target = getattr(n, "tool_bridge_target", "desktop")
-    is_tui_bridge = str(bridge_target or "").lower() in {"tui", "cli", "terminal"}
     if n.tools_catalog:
         instructions += (
             "\n\nCodex native tool catalog for this turn (lossless JSON; use exact names/namespaces from here; local proxy validates requested tools against this registry):\n"
             + n.tools_catalog
             + "\n\nFile-edit policy: if the catalog includes apply_patch and the task is to modify text/source/config files, call apply_patch directly with a minimal patch. Do not call shell_command, node_repl, or PowerShell just to write those files. If apply_patch fails, inspect the error and retry once with corrected patch grammar before falling back."
-            + (
-                "\n\nDo not request tool_search/web_search/dynamic tools from the TUI bridge; Codex TUI cannot execute dynamic tool calls. If a needed browser/computer/plugin/MCP tool is not listed directly, explain that the tool must be exposed by the active Codex tool registry after reconnect/restart instead of emitting a discovery tool call. For any namespace entry, prefer its native_call fields over a flattened name."
-                if is_tui_bridge
-                else "\n\nIf the catalog exposes tool_search/web_search, those are native client-side discovery tools; use them only when a needed local/MCP/plugin tool is not already listed. For any namespace entry, prefer its native_call fields over a flattened name."
-            )
+            + "\n\nIf the catalog exposes tool_search/web_search, those are native Codex discovery tools; use them only when a needed local/MCP/plugin tool is not already listed. The CLI's unsupported app-server DynamicToolCall path is separate from native tool_search_call execution. For any namespace entry, prefer its native_call fields over a flattened name."
         )
     else:
         instructions += (
             "\n\nNo concrete Codex local tool catalog is registered in this request yet. "
             "If the user asks for terminal/files/browser/tools, do not claim tools are unavailable. "
-            + (
-                "Return mode='answer' explaining which concrete MCP/local tool is missing and ask the user to reconnect/restart Codex or expose it in the registry. Do not emit tool_search/web_search/dynamic tool calls from the TUI bridge."
-                if is_tui_bridge
-                else "If you need a local/MCP/plugin capability, answer that the client did not send a concrete tool registry for this turn; do not invent tool names."
-            )
+            + "If you need a local/MCP/plugin capability, answer that the client did not send a concrete tool registry for this turn; do not invent tool names."
         )
     payload: dict[str, Any] = {
         "model": n.model,
@@ -542,7 +557,7 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
         payload["reasoning"] = reasoning
     if n.temperature is not None:
         payload["temperature"] = n.temperature
-    return payload
+    return _apply_responses_lite_transport(payload, n)
 
 
 def build_native_tool_first_payload(n: NormalizedRequest, cfg: Settings = settings, max_tokens: int | None = None) -> dict[str, Any]:
@@ -593,4 +608,4 @@ def build_native_tool_first_payload(n: NormalizedRequest, cfg: Settings = settin
         payload["reasoning"] = reasoning
     if n.temperature is not None:
         payload["temperature"] = n.temperature
-    return payload
+    return _apply_responses_lite_transport(payload, n)
