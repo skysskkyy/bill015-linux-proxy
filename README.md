@@ -21,6 +21,7 @@
 - `0.4.6` 起：GPT-5.6/Codex Responses Lite 仍会从客户端 `additional_tools` 提取本地工具、`tool_search` 和子智能体 schema，但在 `strict_zero=true` 时上游会被降回标准 Responses `tools`/`instructions` 的单 `emit_value` 桥接请求，并去掉 Lite header/metadata，避免进入已观测到会计费的 5.6 Lite 上游路径。
 - `0.4.7` 起：不再提示模型“每次工具调用都写一段进度文字”；普通工具调用示例默认 `answer=""`，但模型自愿返回的有用工具前说明仍会正常展示。默认并发提升到 4，并降低超大文本精确 tokenization 阈值来改善多任务长上下文速度。
 - `0.4.8` 起：对“上网查/联网搜索/打开 URL/latest/current”等明确实时网页需求增加本地网络检索任务流：优先使用已暴露的 Chrome/Browser/Playwright/node_repl/jshook 工具；只有缺少具体浏览器工具但存在 `tool_search` 时，代理先本地返回 `tool_search_call` 做发现，不走上游 `web_search`。
+- `0.4.9` 起：补强 GPT-5.6 能力保真：保留 Codex `model_reasoning_effort` 别名、GPT-5.6 默认 high reasoning；修复 CLI custom `exec` 工具在 `input=""` 时吞掉 `arguments` 的问题；工具 schema 从旧 96 上限提高并优先保留 `exec/apply_patch/tool_search/browser/node_repl/subagent` 等核心工具。
 - `0.4.1` 起：支持多 API key 池；当上游错误字段为 `error.code="cyber_policy"` 且 `error.message` 为完整 cybersecurity-risk 提示时，等待 10 分钟后自动切换下一把 key 并继续原请求。
 - `0.4.2` 起：参考 Codex CLI 的上下文窗口机制，在 90% 阈值前预压缩；遇到 `context_length_exceeded` 时从最旧历史开始裁剪并重跑，同时保留最新用户请求和最新工具批次；reasoning-only 空流改为有限重试，不再伪装成成功回答。
 - 本阶段不做 Codex 配置接入
@@ -216,7 +217,8 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 "tool_bridge": {
   "allow_unknown_tools": false,
   "auto_expand_search": false,
-  "local_web_research_preflight": true
+  "local_web_research_preflight": true,
+  "schema_max_tools": 256
 }
 ```
 
@@ -226,6 +228,20 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 - 未注册工具不会被下发给本地 Codex，避免模型幻觉工具名造成乱调用。
 - 如果本轮没有任何工具 registry，`emit_value` 会限制为 `mode="answer"` 和 `tool_calls=[]`。
 - 明确需要实时网页/URL 信息时，提示词会要求模型使用本地浏览器/HTTP 工具；若本轮只有 `tool_search` 可用，代理会先合成一次本地 `tool_search_call` 暴露工具，避免 gpt-5.6 停在“没有本地工具”或误走上游 `web_search`。
+- 大工具目录下不再按字母顺序截掉后面的关键工具；`exec`、`apply_patch`、`tool_search`、浏览器/MCP、子智能体等会优先进入 `emit_value.tool_calls` 枚举，降低 5.6 “看得到目录但调不了工具”的概率。
+
+## Reasoning / 能力保真
+
+默认示例配置建议：
+
+```json
+"reasoning": {
+  "effort": "high",
+  "summary": "auto"
+}
+```
+
+代理还会识别 Codex 常见的 `model_reasoning_effort` / `model_reasoning_summary` 字段以及 `x-codex-turn-metadata` 中的同名字段；客户端显式值优先。若 GPT-5.6 请求完全没有 reasoning 配置，代理默认给上游 `{"effort":"high"}`，避免 strict-zero de-Lite 后退回偏低推理强度。
 
 ## 上下文预算策略
 

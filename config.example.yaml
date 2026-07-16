@@ -47,6 +47,12 @@ usage:
   max_text_for_exact_tokenize: 120000
   audit_breakdown: true
 
+reasoning:
+  # Kept high by default for Codex/GPT-5.6 quality parity. Explicit client
+  # reasoning/model_reasoning_effort still wins per request.
+  effort: high
+  summary: auto
+
 responses_events:
   fidelity_level: native
   emit_reasoning_summary: false
@@ -68,6 +74,9 @@ tool_bridge:
   # tool_search is visible, return a local tool_search_call before contacting
   # upstream so Codex can expose browser/Chrome/Playwright/node_repl tools.
   local_web_research_preflight: true
+  # Bounded but larger than the old 96-tool cap so GPT-5.6 CLI/Desktop
+  # sessions with many MCP/plugin/subagent tools keep core tools callable.
+  schema_max_tools: 256
 
 limits:
   max_concurrency: 4

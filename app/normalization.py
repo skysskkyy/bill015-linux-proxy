@@ -612,15 +612,27 @@ def extract_reasoning_config(body: dict[str, Any]) -> dict[str, Any] | None:
     """Return client-requested reasoning controls in upstream Responses shape.
 
     Native Responses clients send ``reasoning={"effort": ...}``, while some
-    Chat/compat clients send top-level ``reasoning_effort``.  BILL-015 builds a
-    new upstream Responses payload, so normalize both forms here instead of
-    silently dropping top-level thinking-level controls.
+    Chat/compat clients send top-level ``reasoning_effort``. Codex config and
+    Responses Lite metadata may use ``model_reasoning_effort`` terminology.
+    BILL-015 builds a new upstream Responses payload, so normalize all these
+    forms instead of silently dropping the thinking-level controls that make
+    GPT-5.6 feel like native Codex.
     """
     reasoning = dict(body.get("reasoning") or {}) if isinstance(body.get("reasoning"), dict) else {}
-    if body.get("reasoning_effort") is not None and "effort" not in reasoning:
-        reasoning["effort"] = body.get("reasoning_effort")
-    if body.get("reasoning_summary") is not None and "summary" not in reasoning:
-        reasoning["summary"] = body.get("reasoning_summary")
+    turn_metadata = parse_codex_turn_metadata(body.get("client_metadata")) if isinstance(body.get("client_metadata"), dict) else {}
+    for source in (body, body.get("metadata"), body.get("client_metadata"), turn_metadata):
+        if not isinstance(source, dict):
+            continue
+        if "effort" not in reasoning:
+            for key in ("reasoning_effort", "model_reasoning_effort"):
+                if source.get(key) is not None:
+                    reasoning["effort"] = source.get(key)
+                    break
+        if "summary" not in reasoning:
+            for key in ("reasoning_summary", "model_reasoning_summary"):
+                if source.get(key) is not None:
+                    reasoning["summary"] = source.get(key)
+                    break
     return reasoning or None
 
 

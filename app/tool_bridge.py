@@ -162,7 +162,7 @@ def build_typed_tool_call_schema(
     tool_registry: dict[str, dict[str, Any]] | None,
     *,
     allow_generic_fallback: bool = False,
-    max_tools: int = 96,
+    max_tools: int = 256,
     include_dynamic_tools: bool = True,
 ) -> dict[str, Any]:
     """Build an upstream-compatible item schema for emit_value.tool_calls.
@@ -312,7 +312,8 @@ def _tool_schema_enums(registry: dict[str, dict[str, Any]], *, max_tools: int, i
     namespaces: list[str] = [""]
     call_types: list[str] = []
     seen_specs: set[tuple[str, str, str]] = set()
-    for alias, spec in sorted(registry.items()):
+    ordered_specs = sorted(registry.items(), key=lambda item: _tool_schema_sort_key(item[0], item[1]))
+    for alias, spec in ordered_specs:
         if not isinstance(spec, dict):
             continue
         output_name = str(spec.get("output_name") or alias or "").strip()
@@ -345,6 +346,39 @@ def _tool_schema_enums(registry: dict[str, dict[str, Any]], *, max_tools: int, i
     if not call_types:
         call_types = ["auto", "function", "custom"]
     return names[: max_tools * 3], namespaces[: max_tools + 1], call_types
+
+
+def _tool_schema_sort_key(alias: str, spec: dict[str, Any]) -> tuple[int, str, str]:
+    """Keep high-value native Codex tools inside bounded enum schemas.
+
+    Large GPT-5.6 Responses Lite requests can expose many tool aliases.  If we
+    sort alphabetically and cap at a small number, core tools such as exec,
+    apply_patch, browser/node_repl, tool_search, or subagent controls can fall
+    out of the function schema even though they are present in the catalog.
+    """
+    output_name = str(spec.get("output_name") or alias or "").lower()
+    namespace = str(spec.get("namespace") or "").lower()
+    haystack = " ".join(
+        [
+            str(alias or ""),
+            output_name,
+            namespace,
+            str(spec.get("raw_type") or ""),
+            str(spec.get("call_type") or ""),
+        ]
+    ).lower()
+    priority = 50
+    if output_name in {"exec", "shell_command", "apply_patch"}:
+        priority = 0
+    elif output_name in {"tool_search", "web_search"}:
+        priority = 1
+    elif any(token in haystack for token in ("browser", "chrome", "playwright", "node_repl", "jshook")):
+        priority = 2
+    elif any(token in haystack for token in ("multi_tool_use", "parallel", "subagent", "agent")):
+        priority = 3
+    elif namespace or output_name.startswith("mcp__"):
+        priority = 10
+    return priority, namespace, output_name
 
 
 def _append_unique(values: list[str], value: str) -> None:
@@ -632,8 +666,11 @@ def _looks_like_namespace(value: str) -> bool:
 
 def _custom_input(call: dict[str, Any]) -> str:
     value = call.get("input")
+    arguments = call.get("arguments", "")
+    if value in (None, "") and arguments not in (None, ""):
+        value = arguments
     if value is None:
-        value = call.get("arguments", "")
+        value = ""
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 

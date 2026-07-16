@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.9] - 2026-07-16
+
+### Fixed
+- Fixed a GPT-5.6/CLI custom-tool loss where tools such as `exec` could arrive with `input=""` and a non-empty `arguments` payload; the bridge now recovers the non-empty payload instead of emitting an empty custom tool call.
+- Preserved Codex reasoning controls carried as `model_reasoning_effort` / `model_reasoning_summary`, including inside `x-codex-turn-metadata`, and defaulted GPT-5.6-family strict-zero bridge calls to `reasoning.effort="high"` when the client/config is silent.
+- Prevented large GPT-5.6 tool catalogs from dropping core tools by raising the schema enum cap and prioritizing `exec`, `shell_command`, `apply_patch`, `tool_search`, browser/Chrome/Playwright/node_repl/jshook, MCP, and subagent tools.
+- Preserved non-tool developer text attached to Responses Lite `additional_tools` envelopes while still stripping the raw tool definitions before strict-zero upstream calls.
+
+### Changed
+- Strengthened the bridge prompt to state that the BILL-015 wrapper is transport-only and must not reduce planning, inspection, validation, or code/research quality.
+
+### Tests
+- Added regressions for custom `exec` input recovery, GPT-5.6 reasoning aliases/defaults, core-tool schema prioritization beyond the old 96-tool cap, and Responses Lite developer-text preservation.
+
 ## [0.4.8] - 2026-07-16
 
 ### Added

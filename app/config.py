@@ -170,6 +170,7 @@ class Settings:
     tool_bridge_allow_unknown_tools: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_ALLOW_UNKNOWN_TOOLS", "tool_bridge.allow_unknown_tools", False))
     tool_bridge_auto_expand_search: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_AUTO_EXPAND_SEARCH", "tool_bridge.auto_expand_search", False))
     tool_bridge_local_web_research_preflight: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_LOCAL_WEB_RESEARCH_PREFLIGHT", "tool_bridge.local_web_research_preflight", True))
+    tool_bridge_schema_max_tools: int = field(default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_SCHEMA_MAX_TOOLS", "tool_bridge.schema_max_tools", 256))
 
     @property
     def upstream_api_keys(self) -> list[str]:

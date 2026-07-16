@@ -243,6 +243,54 @@ def test_nested_native_call_shape_is_recovered():
     assert calls[0].arguments == '{"level": 0}'
 
 
+def test_custom_tool_arguments_are_not_lost_when_input_is_empty():
+    from app.tool_bridge import parse_function_arguments
+
+    registry = {"exec": {"call_type": "custom", "output_name": "exec", "raw_type": "custom"}}
+    _, _, _, mode, calls = parse_function_arguments(
+        json.dumps(
+            {
+                "mode": "tool_call",
+                "answer": "",
+                "tool_calls": [
+                    {
+                        "type": "custom",
+                        "namespace": "",
+                        "name": "exec",
+                        "arguments": "Get-ChildItem",
+                        "input": "",
+                    }
+                ],
+            }
+        ),
+        tool_registry=registry,
+    )
+
+    assert mode == "tool_call"
+    assert calls[0].call_type == "custom"
+    assert calls[0].name == "exec"
+    assert calls[0].arguments == "Get-ChildItem"
+
+
+def test_tool_schema_prioritizes_core_tools_beyond_old_96_cap():
+    from app.tool_bridge import build_typed_tool_call_schema
+
+    registry = {
+        f"dummy_{idx:03d}": {"call_type": "function", "output_name": f"dummy_{idx:03d}", "raw_type": "function"}
+        for idx in range(180)
+    }
+    registry["zzzz_exec"] = {"call_type": "custom", "output_name": "exec", "raw_type": "custom"}
+    registry["zzzz_browser"] = {"call_type": "function", "output_name": "navigate", "namespace": "mcp__chrome_browser", "raw_type": "function"}
+    registry["zzzz_tool_search"] = {"call_type": "tool_search", "output_name": "tool_search", "raw_type": "tool_search"}
+
+    schema = build_typed_tool_call_schema(registry, max_tools=32)
+    names = schema["properties"]["name"]["enum"]
+
+    assert "exec" in names
+    assert "tool_search" in names
+    assert "mcp__chrome_browser.navigate" in names
+
+
 def test_local_web_research_intent_detector_avoids_project_search_false_positives():
     from app.local_web_research import detect_local_web_research_intent
 
@@ -867,6 +915,36 @@ def test_responses_lite_additional_tools_populate_cli_registry(monkeypatch):
     )
     assert mode == "tool_call"
     assert calls[0].name == "shell_command"
+
+
+def test_responses_lite_additional_tools_preserves_non_tool_developer_text(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
+    monkeypatch.setattr(settings, "strict_zero", True)
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "instructions": "IMPORTANT 5.6 developer hint",
+                    "tools": [{"type": "function", "name": "shell_command", "parameters": {"type": "object", "properties": {}}}],
+                },
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            ],
+        }
+    )
+    payload = build_bill015_payload(n)
+    dumped_input = json.dumps(payload["input"], ensure_ascii=False)
+
+    assert '"type": "additional_tools"' not in dumped_input
+    assert "IMPORTANT 5.6 developer hint" in dumped_input
+    assert payload["input"][0]["role"] == "developer"
 
 
 def test_responses_lite_non_strict_still_uses_codex_lite_transport(monkeypatch):
@@ -2364,6 +2442,40 @@ def test_bill015_payload_maps_top_level_reasoning_effort_to_responses_reasoning(
 
     assert build_bill015_payload(responses_request)["reasoning"] == {"effort": "medium", "summary": "auto"}
     assert build_bill015_payload(chat_request)["reasoning"] == {"effort": "high"}
+
+
+def test_bill015_payload_maps_codex_model_reasoning_aliases(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "reasoning_effort", "")
+    monkeypatch.setattr(settings, "reasoning_summary", "")
+
+    top_level = normalize_responses_request({"model": "gpt-5.6-sol", "input": "hello", "model_reasoning_effort": "xhigh"})
+    metadata = normalize_responses_request(
+        {
+            "model": "gpt-5.6-sol",
+            "input": "hello",
+            "client_metadata": {"x-codex-turn-metadata": json.dumps({"model_reasoning_effort": "max"})},
+        }
+    )
+
+    assert build_bill015_payload(top_level)["reasoning"] == {"effort": "xhigh"}
+    assert build_bill015_payload(metadata)["reasoning"] == {"effort": "max"}
+
+
+def test_bill015_payload_defaults_gpt56_to_high_reasoning(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "reasoning_effort", "")
+    monkeypatch.setattr(settings, "reasoning_summary", "")
+
+    n = normalize_responses_request({"model": "gpt-5.6-sol", "input": "solve carefully"})
+
+    assert build_bill015_payload(n)["reasoning"] == {"effort": "high"}
 
 
 def test_context_compaction_preserves_latest_user_and_tool_batch():

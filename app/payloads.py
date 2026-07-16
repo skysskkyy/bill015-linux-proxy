@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -83,6 +84,9 @@ def _normal_input_items(n: NormalizedRequest) -> list[dict[str, str]]:
                 # tools item here is duplicate model context and can make the
                 # upstream think it should call native tools directly instead
                 # of using the bridge contract.
+                preserved = _additional_tools_text_context(item)
+                if preserved:
+                    items.append(preserved)
                 continue
             items.append(_strip_nullish(item))
         if items:
@@ -90,6 +94,31 @@ def _normal_input_items(n: NormalizedRequest) -> list[dict[str, str]]:
 
     current = (n.current_user_request or last_user_instruction(n.raw_input) or n.user_input or "").strip()
     return [{"role": "user", "content": current}]
+
+
+def _additional_tools_text_context(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Preserve non-tool developer text from Responses Lite additional_tools.
+
+    Codex 5.6 sometimes uses the Lite additional_tools item as a developer
+    envelope.  The proxy must remove the tool definitions themselves, but any
+    separate text/instructions in that envelope are still model guidance and
+    should not disappear during strict-zero de-Liting.
+    """
+    parts: list[str] = []
+    for key in ("instructions", "text", "content"):
+        value = item.get(key)
+        if value is None:
+            continue
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        if text.strip():
+            parts.append(text.strip())
+    if not parts:
+        return None
+    return {
+        "type": "message",
+        "role": "developer",
+        "content": [{"type": "input_text", "text": "\n\n".join(parts)}],
+    }
 
 
 def _normalize_native_history_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -250,6 +279,11 @@ def _native_reasoning_param(n: NormalizedRequest, cfg: Settings = settings) -> d
     reasoning: dict[str, Any] = {}
     if cfg.reasoning_effort:
         reasoning["effort"] = cfg.reasoning_effort
+    elif _is_gpt56_family(n.model):
+        # Native Codex treats GPT-5.6 as the demanding-agent default.  When a
+        # client omits an explicit reasoning control, keep strict-zero quality
+        # closer to native Codex instead of relying on the provider default.
+        reasoning["effort"] = "high"
     if cfg.reasoning_summary:
         reasoning["summary"] = cfg.reasoning_summary
     # Codex core sets reasoning.context=all_turns for Responses Lite models so
@@ -258,6 +292,11 @@ def _native_reasoning_param(n: NormalizedRequest, cfg: Settings = settings) -> d
     if use_responses_lite_upstream(n, cfg):
         reasoning["context"] = "all_turns"
     return reasoning or None
+
+
+def _is_gpt56_family(model: str | None) -> bool:
+    normalized = str(model or "").lower().replace("_", "-")
+    return normalized.startswith("gpt-5.6") or normalized.startswith("codex-gpt56")
 
 
 def _append_request_controls(payload: dict[str, Any], n: NormalizedRequest) -> None:
@@ -344,6 +383,7 @@ def build_emit_value_schema(
     tool_call_item_schema = build_typed_tool_call_schema(
         concrete_tool_registry,
         allow_generic_fallback=cfg.tool_bridge_allow_unknown_tools and not tool_registry,
+        max_tools=max(32, int(getattr(cfg, "tool_bridge_schema_max_tools", 256) or 256)),
         # Native tool_search_call is handled by Codex Core on every surface.
         # Do not confuse it with app-server DynamicToolCall, which the TUI
         # currently rejects.
@@ -442,7 +482,8 @@ def _native_tools_for_upstream(n: NormalizedRequest, cfg: Settings) -> list[dict
 def _base_bridge_instructions() -> str:
     return (
         "You are Codex running in a local tool loop. Solve the user's task with the same judgment you would use natively: "
-        "inspect before editing, use tools when useful, avoid repeating successful calls, and answer concisely when done. "
+        "inspect before editing, plan multi-step work, use tools when useful, verify changes, avoid repeating successful calls, and answer concisely when done. "
+        "The BILL-015 wrapper is only a transport boundary; do not simplify the task, skip reasoning, skip validation, or reduce code/research quality because you must return a structured tool/answer payload. "
     )
 
 
@@ -552,7 +593,8 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
         "Only put text in answer during mode='tool_call' if that text is genuinely useful to show the user before the tool runs. "
         "Function tool: name=exact catalog name, arguments=JSON string matching that tool's parameter schema. "
         "Namespace/MCP tool: namespace='mcp__...' or 'codex_app', name=subtool. "
-        "Custom/FREEFORM tool such as apply_patch: type='custom', input=raw payload, arguments='{}'. "
+        "Custom/FREEFORM tool: type='custom', put the complete raw payload in input, and use arguments='{}'. Never call a custom tool with empty input unless the catalog says it expects empty input. "
+        "If a custom tool is named exec or describes terminal/shell execution, its input must be the command/script payload expected by that tool, not an empty string. "
         "When editing workspace files and apply_patch is available, prefer apply_patch over shell/PowerShell/Node/Python file writes so Codex can render native file-edit UI and reviewable patches. "
         "Use shell commands for inspection/build/test, not for routine text edits unless apply_patch is unavailable or the edit is generated binary/non-text data. "
         "Parallel independent tool calls are allowed. After tool results appear in a later turn, inspect them first, then answer or request the next tool call."
@@ -628,7 +670,7 @@ def build_native_tool_first_payload(n: NormalizedRequest, cfg: Settings = settin
         instructions += (
             "If more local action is needed, call the exact native Codex tool directly from the provided tools list. "
             "Do not wrap native tool calls in another JSON protocol. "
-            "For custom/FREEFORM tools such as apply_patch, provide the raw custom input expected by that tool. "
+            "For custom/FREEFORM tools such as apply_patch or exec, provide the raw non-empty custom input expected by that tool. "
             "For namespace/MCP tools, preserve the namespace/name selected by the native tool schema. "
             "After tool results appear in a later turn, inspect them first, then call the next native tool or final-answer tool."
         )

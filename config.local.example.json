@@ -53,6 +53,10 @@
     "max_text_for_exact_tokenize": 120000,
     "audit_breakdown": true
   },
+  "reasoning": {
+    "effort": "high",
+    "summary": "auto"
+  },
   "responses_events": {
     "fidelity_level": "native",
     "emit_reasoning_summary": false,
@@ -80,6 +84,7 @@
   "tool_bridge": {
     "allow_unknown_tools": false,
     "auto_expand_search": false,
-    "local_web_research_preflight": true
+    "local_web_research_preflight": true,
+    "schema_max_tools": 256
   }
 }
