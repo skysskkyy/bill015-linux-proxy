@@ -79,6 +79,7 @@
   },
   "tool_bridge": {
     "allow_unknown_tools": false,
-    "auto_expand_search": false
+    "auto_expand_search": false,
+    "local_web_research_preflight": true
   }
 }

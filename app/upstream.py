@@ -12,6 +12,7 @@ from .audit import redact
 from .config import Settings, settings
 from .context_compaction import compact_payload_history, context_threshold_tokens, payload_input_tokens, reinforce_final_action
 from .key_pool import ApiKeySelection, upstream_key_pool
+from .local_web_research import local_web_research_preflight
 from .models import Bill015Result, BridgeToolCall, NormalizedRequest, local_response_id
 from .payloads import build_bill015_payload, use_responses_lite_upstream
 from .sse import SSEEvent, parse_async_sse_lines
@@ -657,6 +658,14 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
     request_id = local_request_id or local_response_id()
     result = Bill015Result(local_request_id=request_id)
     start = time.perf_counter()
+    preflight_call = local_web_research_preflight(n, cfg)
+    if preflight_call:
+        result.bridge_mode = "tool_call"
+        result.tool_calls = [preflight_call]
+        result.retry_reasons.append("local_web_research_preflight")
+        result.duration_ms = int((time.perf_counter() - start) * 1000)
+        return result
+
     if mode == "verify":
         result.verify_pre = await fetch_user_self(cfg)
 

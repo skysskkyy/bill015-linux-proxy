@@ -262,7 +262,7 @@ def main() -> None:
         "answer":"",
         "tool_calls":[{"type":"web_search","name":"web_search","arguments":"{\"query\":\"QuantumNous new-api responses compact\"}","input":""}],
     }), tool_registry=registry)
-    assert_true(web_rewrite_mode == "tool_call" and web_rewrite_calls[0].call_type == "tool_search" and web_rewrite_calls[0].name == "tool_search" and "local web search" in web_rewrite_calls[0].arguments, "web_search was not rewritten to local tool_search")
+    assert_true(web_rewrite_mode == "tool_call" and web_rewrite_calls[0].call_type == "tool_search" and web_rewrite_calls[0].name == "tool_search" and "local web research" in web_rewrite_calls[0].arguments, "web_search was not rewritten to local tool_search")
     browser_answer, _, _, browser_mode, browser_calls = parse_function_arguments(json.dumps({
         "mode":"tool_call",
         "answer":"",

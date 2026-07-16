@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any
 
 from .config import Settings, settings
+from .local_web_research import build_local_web_discovery_arguments
 from .models import BridgeToolCall
 
 
@@ -446,11 +447,7 @@ def _local_tool_search_arguments(call: dict[str, Any]) -> str:
     else:
         query = json.dumps(obj, ensure_ascii=False) if obj else "web search fetch current information"
     query = query.strip() or "web search fetch current information"
-    local_query = (
-        "local web search/fetch using browser chrome node_repl playwright curl PowerShell: "
-        + query
-    )
-    return json.dumps({"query": local_query, "limit": 8}, ensure_ascii=False, separators=(",", ":"))
+    return build_local_web_discovery_arguments(query, limit=20)
 
 
 def resolve_bridge_tool_call(

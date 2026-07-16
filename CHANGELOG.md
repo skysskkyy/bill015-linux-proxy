@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.8] - 2026-07-16
+
+### Added
+- Added a local-web-research task flow for explicit live web/URL requests: the bridge now detects phrases such as "上网查", "联网搜索", URL opens, and latest/current lookups, then instructs the upstream model to use local browser/Chrome/Playwright/node_repl/jshook/HTTP tools instead of server-side `web_search`.
+- Added a strict-zero-safe preflight: when a live web request has `tool_search` but no concrete browser-like tool in the current Codex registry, the proxy returns a native client-side `tool_search_call` immediately without contacting upstream, so Codex can expose local browser tools before the model continues.
+
+### Fixed
+- Prevented network-search discovery from stalling after `tool_search_output` by adding explicit follow-up guidance to use exposed tools rather than merely reporting that tools were found.
+- Kept project/code search prompts such as "修复这个项目的网络搜索功能" on the normal coding path so the new detector does not hijack repository searches.
+
+### Tests
+- Added GPT-5.6 Responses-Lite coverage for local web guidance, preflight `tool_search_call`, repeat-discovery suppression, and project-search false-positive avoidance.
+
 ## [0.4.7] - 2026-07-15
 
 ### Changed

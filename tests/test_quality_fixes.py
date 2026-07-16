@@ -243,6 +243,186 @@ def test_nested_native_call_shape_is_recovered():
     assert calls[0].arguments == '{"level": 0}'
 
 
+def test_local_web_research_intent_detector_avoids_project_search_false_positives():
+    from app.local_web_research import detect_local_web_research_intent
+
+    assert detect_local_web_research_intent("帮我上网查一下今天 OpenAI 有什么最新新闻")
+    assert detect_local_web_research_intent("search the web for the latest Python release")
+    assert detect_local_web_research_intent("打开 https://example.com 看看页面内容")
+    assert not detect_local_web_research_intent("修复这个项目的网络搜索功能")
+    assert not detect_local_web_research_intent("在仓库里搜索 web_search 字符串")
+
+
+def test_local_web_research_guidance_prefers_concrete_browser_tool_for_gpt56(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload, use_responses_lite_upstream
+
+    monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
+    monkeypatch.setattr(settings, "strict_zero", True)
+
+    body = {
+        "model": "gpt-5.6-sol",
+        "client_metadata": {"client": "codex-cli"},
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "mcp__chrome",
+                        "description": "Chrome browser control",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "extract_text",
+                                "description": "Read the current Chrome browser page text",
+                                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                            }
+                        ],
+                    },
+                    {
+                        "type": "tool_search",
+                        "execution": "client",
+                        "description": "discover deferred tools",
+                        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False},
+                    },
+                ],
+            },
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "search the web for today's Codex release notes"}]},
+        ],
+    }
+
+    n = normalize_responses_request(body)
+    payload = build_bill015_payload(n)
+
+    assert n.responses_lite is True
+    assert use_responses_lite_upstream(n, settings) is False
+    assert "LOCAL WEB RESEARCH POLICY" in payload["instructions"]
+    assert "mcp__chrome.extract_text" in payload["instructions"]
+    assert "do not call tool_search first" in payload["instructions"]
+    assert json.dumps(payload["input"], ensure_ascii=False).count('"type": "additional_tools"') == 0
+
+
+def test_local_web_research_preflight_emits_tool_search_without_upstream_key(monkeypatch):
+    from app.config import settings
+    from app.normalization import normalize_responses_request
+    from app.upstream import execute_bill015
+
+    monkeypatch.setattr(settings, "tool_bridge_local_web_research_preflight", True)
+
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.6-sol",
+            "stream": False,
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "帮我上网查一下今天东京天气"}]}],
+            "tools": [
+                {
+                    "type": "tool_search",
+                    "execution": "client",
+                    "description": "discover deferred tools",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False},
+                }
+            ],
+        }
+    )
+
+    result = asyncio.run(execute_bill015(n, "exploit"))
+
+    assert result.bridge_mode == "tool_call"
+    assert result.tool_calls[0].call_type == "tool_search"
+    assert result.tool_calls[0].name == "tool_search"
+    assert "local web research browser chrome playwright" in result.tool_calls[0].arguments
+    assert "今天东京天气" in result.tool_calls[0].arguments
+    assert "local_web_research_preflight" in result.retry_reasons
+
+
+def test_local_web_research_preflight_does_not_repeat_completed_discovery(monkeypatch):
+    from app.config import settings
+    from app.local_web_research import build_local_web_discovery_arguments, local_web_research_preflight
+    from app.normalization import normalize_responses_request
+
+    monkeypatch.setattr(settings, "tool_bridge_local_web_research_preflight", True)
+    query = "帮我上网查一下今天东京天气"
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": query}]},
+                {"type": "tool_search_call", "call_id": "search_done", "execution": "client", "arguments": json.loads(build_local_web_discovery_arguments(query))},
+                {"type": "tool_search_output", "call_id": "search_done", "execution": "client", "status": "completed", "tools": []},
+            ],
+            "tools": [
+                {
+                    "type": "tool_search",
+                    "execution": "client",
+                    "description": "discover deferred tools",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False},
+                }
+            ],
+        }
+    )
+
+    assert local_web_research_preflight(n, settings) is None
+
+
+def test_local_web_research_after_tool_search_output_uses_exposed_tool(monkeypatch):
+    from app.config import settings
+    from app.local_web_research import build_local_web_discovery_arguments
+    from app.normalization import normalize_responses_request
+    from app.payloads import build_bill015_payload
+
+    monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
+    monkeypatch.setattr(settings, "strict_zero", True)
+
+    query = "帮我上网查一下今天东京天气"
+    n = normalize_responses_request(
+        {
+            "model": "gpt-5.6-sol",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": query}]},
+                {"type": "tool_search_call", "call_id": "search_done", "execution": "client", "arguments": json.loads(build_local_web_discovery_arguments(query))},
+                {
+                    "type": "tool_search_output",
+                    "call_id": "search_done",
+                    "execution": "client",
+                    "status": "completed",
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "mcp__node_repl",
+                            "description": "Node-backed browser/HTTP helper",
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "name": "js",
+                                    "description": "Run JavaScript with fetch/playwright support",
+                                    "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"], "additionalProperties": False},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ],
+            "tools": [
+                {
+                    "type": "tool_search",
+                    "execution": "client",
+                    "description": "discover deferred tools",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False},
+                }
+            ],
+        }
+    )
+    payload = build_bill015_payload(n)
+
+    assert "mcp__node_repl.js" in n.tool_registry
+    assert "LOCAL WEB RESEARCH POLICY" in payload["instructions"]
+    assert "mcp__node_repl.js" in payload["instructions"]
+    assert "do not call tool_search first" in payload["instructions"]
+
+
 def test_emit_value_schema_is_upstream_compatible_and_tools_are_validated_locally(monkeypatch):
     from app.config import settings
     from app.normalization import normalize_responses_request

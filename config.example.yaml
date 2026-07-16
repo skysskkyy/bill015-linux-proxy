@@ -64,6 +64,10 @@ tool_bridge:
   # Native-like default: do not synthesize extra tool_search calls beyond what
   # the model explicitly requested.
   auto_expand_search: false
+  # If the latest user request clearly needs live web/URL lookup and only
+  # tool_search is visible, return a local tool_search_call before contacting
+  # upstream so Codex can expose browser/Chrome/Playwright/node_repl tools.
+  local_web_research_preflight: true
 
 limits:
   max_concurrency: 4

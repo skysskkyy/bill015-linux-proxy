@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from .config import Settings, settings
+from .local_web_research import build_local_web_research_guidance
 from .models import NormalizedRequest
 from .normalization import collect_deferred_tools_from_input, last_user_instruction, native_input_transcript
 from .tool_bridge import build_typed_tool_call_schema
@@ -575,6 +576,9 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
             "If the user asks for terminal/files/browser/tools, do not claim tools are unavailable. "
             + "If you need a local/MCP/plugin capability, answer that the client did not send a concrete tool registry for this turn; do not invent tool names."
         )
+    local_web_guidance = build_local_web_research_guidance(n.current_user_request or n.user_input, n.tool_registry)
+    if local_web_guidance:
+        instructions += "\n\n" + local_web_guidance
     payload: dict[str, Any] = {
         "model": n.model,
         "stream": True,

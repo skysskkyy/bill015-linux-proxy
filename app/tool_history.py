@@ -181,6 +181,7 @@ def render_tool_feedback_for_model(history: ToolHistory, *, max_tokens: int = 24
         for name in exposed[:30]:
             lines.append(f"- {name}")
         lines.append("These tools are now callable by exact name. Prefer them over another tool_search if suitable.")
+        lines.append("If the user's pending task is web research or opening a URL, immediately use an exposed browser/chrome/playwright/node_repl/jshook/HTTP tool to search/fetch the original query; do not stop after discovery.")
 
     lines.extend(
         [
