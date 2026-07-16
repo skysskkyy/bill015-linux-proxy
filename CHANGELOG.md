@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.10] - 2026-07-16
+
+### Changed
+- Reduced local hot-path latency without changing bridge semantics: normal turns that are clearly below the compaction threshold now skip the expensive exact payload-token preflight, while near-limit turns still use exact counting and existing compaction behavior.
+- Reused the already parsed native tool history when building the budgeted transcript, avoiding a second full traversal of long Codex `input[]` histories.
+- Avoided repeated tokenization of the original large text while clipping and stopped flattening the latest user body when it is intentionally omitted from the replay transcript.
+
+### Tests
+- Added regressions for the precompaction exact-count gate, token-budget clipping cache behavior, and latest-user-body omission fast path.
+
 ## [0.4.9] - 2026-07-16
 
 ### Fixed

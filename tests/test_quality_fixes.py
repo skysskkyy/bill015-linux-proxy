@@ -2542,6 +2542,68 @@ def test_context_length_error_matcher():
     assert not is_context_length_exceeded({"type": "error", "error": {"code": "bad_request"}})
 
 
+def test_preemptive_compaction_exact_count_only_near_limit():
+    from types import SimpleNamespace
+
+    from app.upstream import _needs_exact_preemptive_token_count
+
+    precompact_limit = 115_200
+
+    assert _needs_exact_preemptive_token_count(SimpleNamespace(estimated_input_tokens=0), precompact_limit)
+    assert not _needs_exact_preemptive_token_count(SimpleNamespace(estimated_input_tokens=10_000), precompact_limit)
+    assert not _needs_exact_preemptive_token_count(SimpleNamespace(estimated_input_tokens=int(precompact_limit * 0.64)), precompact_limit)
+    assert _needs_exact_preemptive_token_count(SimpleNamespace(estimated_input_tokens=int(precompact_limit * 0.70)), precompact_limit)
+
+
+def test_clip_text_token_budget_reuses_original_count(monkeypatch):
+    from app import normalization
+
+    text = "abcdef " * 400
+    original_calls = 0
+
+    def fake_estimate(value, *, json_like=False):
+        nonlocal original_calls
+        if value == text:
+            original_calls += 1
+        return max(1, len(str(value)) // 4)
+
+    monkeypatch.setattr(normalization, "estimate_text_tokens", fake_estimate)
+
+    clipped = normalization._clip_text_to_token_budget(text, 100, keep="head_tail")
+
+    assert clipped != text
+    assert "token-budget omitted middle content" in clipped
+    assert original_calls == 1
+
+
+def test_native_transcript_omits_latest_user_without_flattening_body(monkeypatch):
+    from app import normalization
+
+    original_flatten = normalization.flatten_content
+    current_body = "CURRENT_BODY " * 10_000
+    current_body_flatten_calls = 0
+
+    def wrapped_flatten(content):
+        nonlocal current_body_flatten_calls
+        if content == current_body:
+            current_body_flatten_calls += 1
+        return original_flatten(content)
+
+    monkeypatch.setattr(normalization, "flatten_content", wrapped_flatten)
+
+    transcript = normalization.native_input_transcript(
+        [
+            {"type": "message", "role": "user", "content": "old"},
+            {"type": "message", "role": "user", "content": current_body},
+        ],
+        omit_latest_user_body=True,
+    )
+
+    assert "current user message moved above" in transcript
+    assert "CURRENT_BODY" not in transcript
+    assert current_body_flatten_calls == 0
+
+
 def test_execute_bill015_recovers_args_done_timeout(monkeypatch):
     from app import upstream
     from app.config import settings

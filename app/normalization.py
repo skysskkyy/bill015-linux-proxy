@@ -53,6 +53,35 @@ def flatten_content(content: Any) -> str:
         return json.dumps(content, ensure_ascii=False)
     return str(content)
 
+
+def _content_has_text(content: Any) -> bool:
+    """Cheaply test whether content would flatten to non-empty text."""
+    if content is None:
+        return False
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, str):
+                if item.strip():
+                    return True
+            elif isinstance(item, dict):
+                value = item.get("text")
+                if isinstance(value, str):
+                    if value.strip():
+                        return True
+                elif flatten_content(item).strip():
+                    return True
+            elif str(item).strip():
+                return True
+        return False
+    if isinstance(content, dict):
+        value = content.get("text")
+        if isinstance(value, str):
+            return bool(value.strip())
+    return bool(flatten_content(content).strip())
+
+
 def flatten_responses_input(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -118,7 +147,8 @@ def _clip_text_to_token_budget(text: str, max_tokens: int, *, keep: str = "head_
     text = str(text or "")
     if max_tokens <= 0:
         return ""
-    if estimate_text_tokens(text) <= max_tokens:
+    original_tokens = estimate_text_tokens(text)
+    if original_tokens <= max_tokens:
         return text
     # Binary search by character count, but the stopping criterion is token
     # budget, not a hard character ceiling.
@@ -133,7 +163,7 @@ def _clip_text_to_token_budget(text: str, max_tokens: int, *, keep: str = "head_
         else:
             head = mid // 3
             tail = mid - head
-            candidate = text[:head] + f"\n...[token-budget omitted middle content; original_tokens~{estimate_text_tokens(text)} budget={max_tokens}]...\n" + text[-tail:]
+            candidate = text[:head] + f"\n...[token-budget omitted middle content; original_tokens~{original_tokens} budget={max_tokens}]...\n" + text[-tail:]
         if estimate_text_tokens(candidate) <= max_tokens:
             best = candidate
             lo = mid + 1
@@ -266,17 +296,20 @@ def native_input_transcript(
     include_context_roles: bool = False,
     omit_latest_user_body: bool = False,
     omit_latest_tool_batch: bool = False,
+    tool_history: Any = None,
 ) -> str:
     if isinstance(value, str):
         return _clip_text_to_token_budget(value, max_tokens, keep="tail")
     if not isinstance(value, list):
         return _clip_text_to_token_budget(flatten_content(value), max_tokens, keep="tail")
-    history = parse_tool_history(value)
+    history = tool_history if tool_history is not None else parse_tool_history(value)
     latest_batch_ids = {out.call_id for out in history.latest_outputs if out.call_id} if omit_latest_tool_batch else set()
     latest_user_index = -1
-    for idx, item in enumerate(value):
-        if isinstance(item, dict) and item.get("role") == "user" and flatten_content(item.get("content", item.get("text", ""))).strip():
+    for idx in range(len(value) - 1, -1, -1):
+        item = value[idx]
+        if isinstance(item, dict) and item.get("role") == "user" and _content_has_text(item.get("content", item.get("text", ""))):
             latest_user_index = idx
+            break
     current_sections: list[str] = []
     recent_sections: list[str] = []
     history_sections: list[str] = []
@@ -291,11 +324,14 @@ def native_input_transcript(
             omitted_context += 1
             continue
         if typ == "message" or role:
-            text = flatten_content(item.get("content", item.get("text", "")))
-            if text:
-                if idx == latest_user_index and omit_latest_user_body:
+            content = item.get("content", item.get("text", ""))
+            if idx == latest_user_index and omit_latest_user_body:
+                if _content_has_text(content):
                     current_sections.append(f"[{idx}] current user message moved above; body omitted here to avoid duplication.")
-                elif idx == latest_user_index:
+                continue
+            text = flatten_content(content)
+            if text:
+                if idx == latest_user_index:
                     current_sections.append(f"[{idx}] {role or 'event'} message:\n{text}")
                 else:
                     history_sections.append(f"[{idx}] {role or 'event'} message:\n{text}")
@@ -695,6 +731,7 @@ def normalize_responses_request(
             include_context_roles=False,
             omit_latest_user_body=True,
             omit_latest_tool_batch=True,
+            tool_history=tool_history,
         )
         if isinstance(raw_input, list)
         else _clip_text_to_token_budget(flatten_responses_input(raw_input), transcript_budget, keep="tail")

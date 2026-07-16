@@ -22,6 +22,7 @@
 - `0.4.7` 起：不再提示模型“每次工具调用都写一段进度文字”；普通工具调用示例默认 `answer=""`，但模型自愿返回的有用工具前说明仍会正常展示。默认并发提升到 4，并降低超大文本精确 tokenization 阈值来改善多任务长上下文速度。
 - `0.4.8` 起：对“上网查/联网搜索/打开 URL/latest/current”等明确实时网页需求增加本地网络检索任务流：优先使用已暴露的 Chrome/Browser/Playwright/node_repl/jshook 工具；只有缺少具体浏览器工具但存在 `tool_search` 时，代理先本地返回 `tool_search_call` 做发现，不走上游 `web_search`。
 - `0.4.9` 起：补强 GPT-5.6 能力保真：保留 Codex `model_reasoning_effort` 别名、GPT-5.6 默认 high reasoning；修复 CLI custom `exec` 工具在 `input=""` 时吞掉 `arguments` 的问题；工具 schema 从旧 96 上限提高并优先保留 `exec/apply_patch/tool_search/browser/node_repl/subagent` 等核心工具。
+- `0.4.10` 起：优化本地热路径耗时：小/中型请求跳过不必要的精确 payload token 预检，复用已解析的工具历史，并减少大文本裁剪/最新用户消息省略时的重复扫描；上下文压缩、工具桥接和 strict-zero 语义不变。
 - `0.4.1` 起：支持多 API key 池；当上游错误字段为 `error.code="cyber_policy"` 且 `error.message` 为完整 cybersecurity-risk 提示时，等待 10 分钟后自动切换下一把 key 并继续原请求。
 - `0.4.2` 起：参考 Codex CLI 的上下文窗口机制，在 90% 阈值前预压缩；遇到 `context_length_exceeded` 时从最旧历史开始裁剪并重跑，同时保留最新用户请求和最新工具批次；reasoning-only 空流改为有限重试，不再伪装成成功回答。
 - 本阶段不做 Codex 配置接入

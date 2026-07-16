@@ -580,6 +580,22 @@ def _record_compaction(result: Bill015Result, reason: str, before_tokens: int, a
     result.event_sequence.append(f"retry:{audit_reason}")
 
 
+def _needs_exact_preemptive_token_count(n: NormalizedRequest, precompact_limit: int) -> bool:
+    """Return whether hot-path precompaction needs a full payload token pass.
+
+    Native-context preservation means every request builds a Responses payload,
+    but most turns are far below the configured compaction threshold.  Exact
+    payload tokenization is only needed near that threshold; skipping it for
+    clearly small/medium turns keeps behavior identical while avoiding local
+    CPU work before the upstream stream starts.
+    """
+    estimate = int(getattr(n, "estimated_input_tokens", 0) or 0)
+    if estimate <= 0:
+        return True
+    # Keep a large safety margin for bridge instructions/tool catalog overhead.
+    return estimate >= int(max(8_000, precompact_limit * 0.65))
+
+
 def _compact_for_context_recovery(payload: dict[str, Any], result: Bill015Result, cfg: Settings, reason: str, attempt: int, *, aggressive: bool) -> tuple[dict[str, Any], bool]:
     before = payload_input_tokens(payload)
     target_percent = max(35, cfg.compact_target_percent - attempt * 10)
@@ -677,7 +693,11 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
 
     payload = build_bill015_payload(n, cfg)
     precompact_limit = context_threshold_tokens(cfg.context_window_tokens, cfg.auto_compact_percent)
-    initial_tokens = payload_input_tokens(payload)
+    initial_tokens = (
+        payload_input_tokens(payload)
+        if _needs_exact_preemptive_token_count(n, precompact_limit)
+        else int(getattr(n, "estimated_input_tokens", 0) or 0)
+    )
     if initial_tokens >= precompact_limit:
         target = context_threshold_tokens(cfg.context_window_tokens, cfg.compact_target_percent)
         compacted, removed, clipped = compact_payload_history(
