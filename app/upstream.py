@@ -475,6 +475,7 @@ def audit_from_result(result: Bill015Result, n: NormalizedRequest, mode: str, fa
         "latest_tool_outputs": len(n.tool_history.latest_outputs) if n.tool_history else 0,
         "latest_tool_failed": n.latest_tool_failed,
         "pending_tool_calls": n.pending_tool_call_count,
+        "tool_catalog_stats": n.tool_catalog_stats,
         "tool_loop_decision": result.bridge_mode,
         "repeated_tool_call_detected": any(
             is_repeated_successful_call(c.name, c.arguments, n.tool_history)

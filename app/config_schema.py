@@ -46,6 +46,8 @@ class Bill015Config(StrictConfigModel):
     force_emit_value: bool | None = None
     block_passthrough: bool | None = None
     block_normal_mode: bool | None = None
+    max_tool_argument_chars: int | None = None
+    max_total_emit_value_chars: int | None = None
 
 
 class LoggingConfig(StrictConfigModel):
@@ -116,6 +118,14 @@ class ToolBridgeConfig(StrictConfigModel):
     auto_expand_search: bool | None = None
     local_web_research_preflight: bool | None = None
     schema_max_tools: int | None = None
+    selection_max_tools: int | None = None
+    catalog_max_chars: int | None = None
+
+
+class MultimodalConfig(StrictConfigModel):
+    strategy: Literal["reject", "local_extract", "native_passthrough"] | None = None
+    max_images: int | None = None
+    max_image_bytes: int | None = None
 
 
 class LocalConfigSchema(StrictConfigModel):
@@ -132,6 +142,7 @@ class LocalConfigSchema(StrictConfigModel):
     key_pool: KeyPoolConfig | None = None
     admin: AdminConfig | None = None
     tool_bridge: ToolBridgeConfig | None = None
+    multimodal: MultimodalConfig | None = None
 
 
 def validate_local_config(obj: dict[str, Any]) -> list[str]:

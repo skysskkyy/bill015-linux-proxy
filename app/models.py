@@ -45,6 +45,7 @@ class NormalizedRequest:
     tools_summary: str = ""
     tools_catalog: str = ""
     tool_registry: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tool_catalog_stats: dict[str, Any] = field(default_factory=dict)
     tool_bridge_target: str = "desktop"
     tool_history: Any = None
     latest_tool_summary: str = ""

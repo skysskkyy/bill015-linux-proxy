@@ -142,6 +142,8 @@ class Settings:
     reasoning_effort: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_EFFORT", "reasoning.effort", ""))
     reasoning_summary: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_SUMMARY", "reasoning.summary", ""))
     max_answer_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_ANSWER_CHARS", "bill015.max_answer_chars", 65536))
+    max_tool_argument_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_TOOL_ARGUMENT_CHARS", "bill015.max_tool_argument_chars", 262144))
+    max_total_emit_value_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_TOTAL_EMIT_VALUE_CHARS", "bill015.max_total_emit_value_chars", 393216))
     max_request_bytes: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_REQUEST_BYTES", "limits.max_request_bytes", 1048576))
     max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 12))
     max_queue_size: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_QUEUE_SIZE", "limits.max_queue_size", 8))
@@ -190,6 +192,11 @@ class Settings:
     tool_bridge_auto_expand_search: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_AUTO_EXPAND_SEARCH", "tool_bridge.auto_expand_search", False))
     tool_bridge_local_web_research_preflight: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_LOCAL_WEB_RESEARCH_PREFLIGHT", "tool_bridge.local_web_research_preflight", True))
     tool_bridge_schema_max_tools: int = field(default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_SCHEMA_MAX_TOOLS", "tool_bridge.schema_max_tools", 256))
+    tool_bridge_selection_max_tools: int = field(default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_SELECTION_MAX_TOOLS", "tool_bridge.selection_max_tools", 160))
+    tool_bridge_catalog_max_chars: int = field(default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_CATALOG_MAX_CHARS", "tool_bridge.catalog_max_chars", 120000))
+    multimodal_strategy: str = field(default_factory=lambda: _env_str("BILL015_MULTIMODAL_STRATEGY", "multimodal.strategy", "reject").strip().lower())
+    multimodal_max_images: int = field(default_factory=lambda: _env_int("BILL015_MULTIMODAL_MAX_IMAGES", "multimodal.max_images", 8))
+    multimodal_max_image_bytes: int = field(default_factory=lambda: _env_int("BILL015_MULTIMODAL_MAX_IMAGE_BYTES", "multimodal.max_image_bytes", 10485760))
 
     @property
     def upstream_api_keys(self) -> list[str]:
@@ -246,4 +253,6 @@ if settings.force_emit_value and settings.bridge_strategy == "native_tool_first"
     # account for prompt/output tokens before our local abort boundary.  In
     # safe bridge mode fails closed back to the proven forced emit_value bridge.
     settings.bridge_strategy = "emit_value"
+if settings.multimodal_strategy not in {"reject", "local_extract", "native_passthrough"}:
+    settings.multimodal_strategy = "reject"
 settings.config_warnings = CONFIG_WARNINGS

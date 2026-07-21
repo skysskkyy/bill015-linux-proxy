@@ -276,7 +276,10 @@ def _force_compaction_metadata(body: dict[str, Any]) -> dict[str, Any]:
 
 
 async def handle_responses_body(body: dict[str, Any], request_headers: dict[str, str] | None = None):
-    body, image_replacements = sanitize_unsupported_image_inputs(body)
+    try:
+        body, image_replacements = sanitize_unsupported_image_inputs(body)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": "local_proxy_vision_unsupported", "message": str(e)}) from e
     request_headers = codex_request_headers(request_headers)
     n = normalize_responses_request(body, request_headers=request_headers)
     mode = active_mode()
@@ -419,7 +422,10 @@ async def responses_compact(request: Request):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    body, _image_replacements = sanitize_unsupported_image_inputs(await read_json_body(request))
+    try:
+        body, _image_replacements = sanitize_unsupported_image_inputs(await read_json_body(request))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": "local_proxy_vision_unsupported", "message": str(e)}) from e
     n = normalize_chat_request(body, request_headers=codex_request_headers(dict(request.headers)))
     mode = active_mode()
     if mode == "circuit-open":

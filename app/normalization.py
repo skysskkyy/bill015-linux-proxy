@@ -5,7 +5,7 @@ from typing import Any
 
 from .config import Settings, settings
 from .models import NormalizedRequest
-from .tool_bridge import build_client_tool_catalog
+from .tool_bridge import build_client_tool_catalog, select_tool_registry
 from .tool_history import parse_tool_history, render_tool_feedback_for_model
 from .usage_estimator import estimate_chat_usage_from_body, estimate_responses_usage_from_body, estimate_text_tokens
 
@@ -452,7 +452,9 @@ def request_needs_passthrough(body: dict[str, Any]) -> tuple[bool, str | None]:
     return False, None
 
 
-def sanitize_unsupported_image_inputs(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+def sanitize_unsupported_image_inputs(
+    body: dict[str, Any], cfg: Settings = settings
+) -> tuple[dict[str, Any], int]:
     """Replace image/screenshot payloads with a textual local-proxy notice.
 
     The BILL-015 bridge cannot safely early-abort native multimodal/image
@@ -463,6 +465,9 @@ def sanitize_unsupported_image_inputs(body: dict[str, Any]) -> tuple[dict[str, A
     """
 
     replacements = 0
+    strategy = cfg.multimodal_strategy
+    if strategy == "native_passthrough":
+        return dict(body), 0
 
     def is_image_node(value: Any) -> bool:
         if not isinstance(value, dict):
@@ -525,6 +530,12 @@ def sanitize_unsupported_image_inputs(body: dict[str, Any]) -> tuple[dict[str, A
     if "messages" in sanitized:
         value = sanitized.get("messages")
         sanitized["messages"] = sanitize_sequence(value, top_level_items=True) if isinstance(value, list) else sanitize_value(value)
+    if replacements and strategy == "reject":
+        raise ValueError(
+            "local_proxy_vision_unsupported: this BILL-015 bridge did not inspect the image. "
+            "Use a local image-analysis tool or set multimodal.strategy=native_passthrough "
+            "only if native billable passthrough is intentionally allowed."
+        )
     return sanitized, replacements
 
 def collect_deferred_tools_from_input(value: Any) -> list[dict[str, Any]]:
@@ -724,6 +735,11 @@ def normalize_responses_request(
     transcript_budget = max(6_000, context_budget - instruction_tokens - estimate_text_tokens(latest_tool_summary) - 2_000)
     current_budget = max(4_000, min(32_000, context_budget // 2))
     current_user_request = _clip_text_to_token_budget(last_user_instruction(raw_input), current_budget, keep="tail")
+    selected_registry, tool_catalog_stats = select_tool_registry(
+        tool_registry,
+        current_user_request or flatten_responses_input(raw_input),
+        max_tools=cfg.tool_bridge_selection_max_tools,
+    )
     user_input = (
         native_input_transcript(
             raw_input,
@@ -765,7 +781,8 @@ def normalize_responses_request(
         responses_lite=_responses_lite_requested(body, raw_input, request_headers),
         tools_summary=tools_catalog,
         tools_catalog=tools_catalog,
-        tool_registry=tool_registry,
+        tool_registry=selected_registry,
+        tool_catalog_stats=tool_catalog_stats,
         tool_bridge_target=tool_bridge_target,
         tool_history=tool_history,
         latest_tool_summary=latest_tool_summary,
@@ -803,6 +820,9 @@ def normalize_chat_request(
                     break
     if not current_user_request:
         current_user_request = user_input
+    selected_registry, tool_catalog_stats = select_tool_registry(
+        tool_registry, current_user_request, max_tools=cfg.tool_bridge_selection_max_tools
+    )
     return NormalizedRequest(
         model=cfg.map_model(body.get("model")),
         original_model=body.get("model"),
@@ -826,7 +846,8 @@ def normalize_chat_request(
         responses_lite=_responses_lite_requested(body, body.get("messages", []), request_headers),
         tools_summary=tools_catalog,
         tools_catalog=tools_catalog,
-        tool_registry=tool_registry,
+        tool_registry=selected_registry,
+        tool_catalog_stats=tool_catalog_stats,
         tool_bridge_target=tool_bridge_target,
         instructions=instructions,
         user_input=user_input,

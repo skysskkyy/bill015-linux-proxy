@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.13] - 2026-07-21
+
+### Added
+- Added request-aware tool selection: core tools are pinned, relevant tools are ranked, and excess tools are explicitly marked deferred instead of silently disappearing. Audit records now include canonical, selected, deferred, and dropped counts.
+- Added explicit lossy-compaction notices for conversation history and clipped tool output so the model knows which evidence it did not inspect.
+- Added multimodal strategies (`reject`, `local_extract`, `native_passthrough`); the safe default now rejects images with a diagnostic 422 instead of silently pretending vision occurred.
+- Added emit-value integrity ceilings for individual tool arguments and the total wrapper payload; oversized calls are blocked rather than partially executed.
+
+### Changed
+- The callable tool schema defaults to 160 request-relevant/core tools while retaining the full 256 schema ceiling and preserving deferred discovery guidance.
+
 ## [0.4.12] - 2026-07-21
 
 ### Added

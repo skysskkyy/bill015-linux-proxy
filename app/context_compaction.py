@@ -83,7 +83,14 @@ def _clip_string(value: str, max_chars: int) -> str:
         return value
     head = max_chars // 3
     tail = max_chars - head
-    return value[:head] + f"\n...[local compaction omitted {len(value) - max_chars} chars]...\n" + value[-tail:]
+    return (
+        value[:head]
+        + "\n[LOCAL LOSSY COMPACTION NOTICE]\n"
+        + f"- original_chars={len(value)} retained_chars={max_chars} omitted_middle_chars={len(value) - max_chars}\n"
+        + "- The omitted middle was NOT inspected by the model. Re-run/read the source tool, file, or log before making an exact claim.\n"
+        + "[END LOCAL LOSSY COMPACTION NOTICE]\n"
+        + value[-tail:]
+    )
 
 
 def _clip_large_fields(value: Any, max_chars: int) -> Any:
@@ -97,7 +104,14 @@ def _clip_large_fields(value: Any, max_chars: int) -> Any:
 
 
 def _summary_item(removed: list[Any]) -> dict[str, Any]:
-    lines = [COMPACTION_SUMMARY_PREFIX, "Older conversation history was compacted locally before retry."]
+    lines = [
+        COMPACTION_SUMMARY_PREFIX,
+        "[LOCAL CONTEXT COMPACTION NOTICE]",
+        f"- summary_kind=lossy items_removed={len(removed)}",
+        "- Exact details may be missing. Do not claim removed content was inspected.",
+        "- Re-read files, logs, or rerun tools before decisions that require exact evidence.",
+        "[END LOCAL CONTEXT COMPACTION NOTICE]",
+    ]
     for item in removed[-12:]:
         if not isinstance(item, dict):
             continue

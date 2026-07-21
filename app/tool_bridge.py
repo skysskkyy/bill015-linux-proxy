@@ -11,6 +11,65 @@ from .local_web_research import build_local_web_discovery_arguments
 from .models import BridgeToolCall
 
 
+def canonical_tool_specs(registry: dict[str, dict[str, Any]] | None) -> list[tuple[str, dict[str, Any]]]:
+    """Return each executable tool once, independent of its registered aliases."""
+    unique: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
+    for alias, spec in (registry or {}).items():
+        if not isinstance(spec, dict):
+            continue
+        namespace = str(spec.get("namespace") or "")
+        name = str(spec.get("output_name") or alias or "").strip()
+        call_type = str(spec.get("call_type") or spec.get("raw_type") or "function")
+        if not name:
+            continue
+        key = (namespace, name, call_type)
+        current = unique.get(key)
+        if current is None or _tool_schema_sort_key(alias, spec) < _tool_schema_sort_key(current[0], current[1]):
+            unique[key] = (alias, spec)
+    return sorted(unique.values(), key=lambda item: _tool_schema_sort_key(item[0], item[1]))
+
+
+def select_tool_registry(
+    registry: dict[str, dict[str, Any]] | None,
+    query: str,
+    *,
+    max_tools: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """Select core and request-relevant tools while retaining full local validation."""
+    specs = canonical_tool_specs(registry)
+    budget = max(1, int(max_tools))
+    words = {w for w in re.findall(r"[a-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", str(query or "").lower())}
+
+    def relevance(item: tuple[str, dict[str, Any]]) -> tuple[int, int, str]:
+        alias, spec = item
+        schema = spec.get("schema") if isinstance(spec.get("schema"), dict) else {}
+        haystack = " ".join(
+            str(value or "").lower()
+            for value in (alias, spec.get("namespace"), spec.get("output_name"), schema.get("description"))
+        )
+        matches = sum(word in haystack for word in words)
+        core_priority = _tool_schema_sort_key(alias, spec)[0]
+        return (-matches, core_priority, haystack)
+
+    core = [item for item in specs if _tool_schema_sort_key(item[0], item[1])[0] <= 3]
+    remaining = [item for item in specs if item not in core]
+    chosen = (core + sorted(remaining, key=relevance))[:budget]
+    chosen_keys = {id(spec) for _, spec in chosen}
+    selected: dict[str, dict[str, Any]] = {alias: spec for alias, spec in (registry or {}).items() if id(spec) in chosen_keys}
+    selected_labels = [f"{spec.get('namespace')}.{spec.get('output_name')}" if spec.get("namespace") else str(spec.get("output_name") or alias) for alias, spec in chosen]
+    deferred_labels = [f"{spec.get('namespace')}.{spec.get('output_name')}" if spec.get("namespace") else str(spec.get("output_name") or alias) for alias, spec in specs if id(spec) not in chosen_keys]
+    stats = {
+        "registry_alias_count": len(registry or {}),
+        "canonical_tool_count": len(specs),
+        "schema_tool_count": len(chosen),
+        "deferred_tool_count": len(deferred_labels),
+        "selected_tools": selected_labels,
+        "deferred_tools": deferred_labels,
+        "dropped_tool_count": 0,
+    }
+    return selected, stats
+
+
 def _compact_tool_doc(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _compact_tool_doc(v) for k, v in value.items() if v is not None}
@@ -312,7 +371,7 @@ def _tool_schema_enums(registry: dict[str, dict[str, Any]], *, max_tools: int, i
     namespaces: list[str] = [""]
     call_types: list[str] = []
     seen_specs: set[tuple[str, str, str]] = set()
-    ordered_specs = sorted(registry.items(), key=lambda item: _tool_schema_sort_key(item[0], item[1]))
+    ordered_specs = canonical_tool_specs(registry)
     for alias, spec in ordered_specs:
         if not isinstance(spec, dict):
             continue
@@ -764,6 +823,14 @@ def parse_function_arguments(
     tool_registry: dict[str, dict[str, Any]] | None = None,
     allow_dynamic_tools: bool = True,
 ) -> tuple[str, bool, bool, str, list[BridgeToolCall]]:
+    if len(raw) > cfg.max_total_emit_value_chars:
+        return (
+            "上游 emit_value 参数超过代理完整性上限；代理没有执行可能被截断的工具调用。请把大补丁或大脚本拆成更小的调用后重试。",
+            True,
+            False,
+            "answer",
+            [],
+        )
     try:
         obj, malformed, repaired = _load_arguments_object(raw)
     except Exception as exc:
@@ -799,6 +866,16 @@ def parse_function_arguments(
             if resolved:
                 tool_calls.append(resolved)
         tool_calls = expand_deferred_tool_searches(tool_calls, tool_registry, cfg)
+        oversized = [call for call in tool_calls if len(call.arguments) > cfg.max_tool_argument_chars]
+        if oversized:
+            labels = ", ".join(call.name for call in oversized[:5])
+            return (
+                f"工具参数超过代理完整性上限（{labels}）；已阻止执行。请按文件或步骤拆分后重试。",
+                True,
+                False,
+                "answer",
+                [],
+            )
         if not tool_calls:
             mode = "answer"
             answer = answer or "需要继续操作，但代理没有拿到当前 TUI 可执行的具体本地工具。请重启/重连 Codex，让 MCP 工具直接出现在工具注册表中；代理不会再发起 TUI 不支持的动态 tool_search 调用。"

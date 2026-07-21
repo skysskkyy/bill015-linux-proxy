@@ -139,6 +139,7 @@ def render_tool_feedback_for_model(history: ToolHistory, *, max_tokens: int = 24
         outputs_left = max(1, len(latest_outputs) - offset + 1)
         output_budget = max(500, remaining_tokens // outputs_left)
         rendered_output = _clip_tokens_head_tail(output.stdout_excerpt or output.output, output_budget)
+        original_output = output.stdout_excerpt or output.output
         lines.extend(
             [
                 "",
@@ -152,6 +153,15 @@ def render_tool_feedback_for_model(history: ToolHistory, *, max_tokens: int = 24
                 rendered_output,
             ]
         )
+        if rendered_output != original_output:
+            lines.extend(
+                [
+                    "[LOCAL TOOL OUTPUT LOSS NOTICE]",
+                    f"- call_id={output.call_id or '<missing>'} original_chars={len(original_output)} retained_chars={len(rendered_output)}",
+                    "- Middle content may contain relevant evidence and was not inspected. Re-run the tool with narrower output before exact conclusions.",
+                    "[END LOCAL TOOL OUTPUT LOSS NOTICE]",
+                ]
+            )
         remaining_tokens = max(0, max_tokens - _estimate_tokens("\n".join(lines)))
         if output.stderr_excerpt:
             lines.extend(["", "Key error lines:", _clip_tokens_head_tail(output.stderr_excerpt, 900)])

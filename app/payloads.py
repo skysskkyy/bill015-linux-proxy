@@ -612,6 +612,17 @@ def build_emit_value_payload(n: NormalizedRequest, cfg: Settings = settings, max
             + "\n\nFile-edit policy: if the catalog includes apply_patch and the task is to modify text/source/config files, call apply_patch directly with a minimal patch. Do not call shell_command, node_repl, or PowerShell just to write those files. If apply_patch fails, inspect the error and retry once with corrected patch grammar before falling back."
             + "\n\nIf the catalog exposes tool_search/web_search, those are native Codex discovery tools; use them only when a needed local/MCP/plugin tool is not already listed. The CLI's unsupported app-server DynamicToolCall path is separate from native tool_search_call execution. For any namespace entry, prefer its native_call fields over a flattened name."
         )
+        stats = n.tool_catalog_stats or {}
+        if stats.get("deferred_tool_count"):
+            deferred_preview = ", ".join(str(name) for name in stats.get("deferred_tools", [])[:20])
+            instructions += (
+                "\n\n[LOCAL TOOL SELECTION NOTICE] "
+                f"The client supplied {stats.get('canonical_tool_count', 0)} executable tools; "
+                f"{stats.get('schema_tool_count', 0)} request-relevant/core tools are callable in this turn and "
+                f"{stats.get('deferred_tool_count', 0)} are deferred. "
+                "Use tool_search when a needed capability is not in the callable enum; do not claim deferred tools were inspected. "
+                + (f"Deferred examples: {deferred_preview}." if deferred_preview else "")
+            )
     else:
         instructions += (
             "\n\nNo concrete Codex local tool catalog is registered in this request yet. "

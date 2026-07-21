@@ -25,6 +25,7 @@
 - `0.4.10` 起：优化本地热路径耗时：小/中型请求跳过不必要的精确 payload token 预检，复用已解析的工具历史，并减少大文本裁剪/最新用户消息省略时的重复扫描；上下文压缩、工具桥接和 strict-zero 语义不变。
 - `0.4.11` 起：把含义混杂的 `strict_zero` 拆为 `force_emit_value`、`block_passthrough`、`block_normal_mode` 三个安全桥策略；这些开关不再禁用错误重试。`cyber_policy` 会立即切换下一把 Key 重跑，并让失败 Key 冷却一段时间。
 - `0.4.12` 起：并发工作槽提升到 12，增加 8 个有界排队位、60 秒排队超时和 20 分钟请求总时限；客户端断开会取消未完成的上游任务，并在健康指标中显示活跃、排队和超时数量。
+- `0.4.13` 起：工具目录改为“核心工具固定 + 按请求相关度选择 + 其余显式 deferred”，有损上下文/工具输出裁剪会明确告知模型；图片默认明确返回不支持视觉，而不再静默伪装；超大工具参数会在执行前做完整性拦截。
 - `0.4.1` 起：支持多 API key 池；当上游错误字段为 `error.code="cyber_policy"` 且 `error.message` 为完整 cybersecurity-risk 提示时，等待 10 分钟后自动切换下一把 key 并继续原请求。
 - `0.4.2` 起：参考 Codex CLI 的上下文窗口机制，在 90% 阈值前预压缩；遇到 `context_length_exceeded` 时从最旧历史开始裁剪并重跑，同时保留最新用户请求和最新工具批次；reasoning-only 空流改为有限重试，不再伪装成成功回答。
 - 本阶段不做 Codex 配置接入
@@ -235,7 +236,9 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
   "allow_unknown_tools": false,
   "auto_expand_search": false,
   "local_web_research_preflight": true,
-  "schema_max_tools": 256
+  "schema_max_tools": 256,
+  "selection_max_tools": 160,
+  "catalog_max_chars": 120000
 }
 ```
 
@@ -246,6 +249,20 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 - 如果本轮没有任何工具 registry，`emit_value` 会限制为 `mode="answer"` 和 `tool_calls=[]`。
 - 明确需要实时网页/URL 信息时，提示词会要求模型使用本地浏览器/HTTP 工具；若本轮只有 `tool_search` 可用，代理会先合成一次本地 `tool_search_call` 暴露工具，避免 gpt-5.6 停在“没有本地工具”或误走上游 `web_search`。
 - 大工具目录下不再按字母顺序截掉后面的关键工具；`exec`、`apply_patch`、`tool_search`、浏览器/MCP、子智能体等会优先进入 `emit_value.tool_calls` 枚举，降低 5.6 “看得到目录但调不了工具”的概率。
+- 超过 `selection_max_tools` 的工具会标记为 deferred；审计记录的 `tool_catalog_stats` 会显示客户端规范工具数、实际下发数、deferred 数和真正丢弃数。模型需要长尾能力时应先调用 `tool_search`，不会再把未下发工具误认为已经检查。
+- 上下文或工具输出发生有损裁剪时，会插入 `LOCAL ... LOSS NOTICE`，明确原始/保留字符数，并要求模型在精确结论前重新读取文件或缩小范围重跑工具。
+
+图片默认策略为明确拒绝：
+
+```json
+"multimodal": {
+  "strategy": "reject",
+  "max_images": 8,
+  "max_image_bytes": 10485760
+}
+```
+
+`reject` 返回 `local_proxy_vision_unsupported`，避免误以为模型看过图片；`local_extract` 只移除图片并注入醒目的“未查看视觉内容”说明，适合外部工具已经先做 OCR/视觉描述的流程；`native_passthrough` 会直接走原生多模态，可能破坏安全早断开/用量语义，默认不要开启。
 
 ## Reasoning / 能力保真
 

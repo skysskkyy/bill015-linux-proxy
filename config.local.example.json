@@ -35,6 +35,8 @@
     "answer_field": "answer",
     "max_output_tokens": 8192,
     "max_answer_chars": 65536,
+    "max_tool_argument_chars": 262144,
+    "max_total_emit_value_chars": 393216,
     "force_emit_value": true,
     "block_passthrough": true,
     "block_normal_mode": true,
@@ -96,6 +98,13 @@
     "allow_unknown_tools": false,
     "auto_expand_search": false,
     "local_web_research_preflight": true,
-    "schema_max_tools": 256
+    "schema_max_tools": 256,
+    "selection_max_tools": 160,
+    "catalog_max_chars": 120000
+  },
+  "multimodal": {
+    "strategy": "reject",
+    "max_images": 8,
+    "max_image_bytes": 10485760
   }
 }

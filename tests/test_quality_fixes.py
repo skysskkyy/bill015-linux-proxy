@@ -1622,27 +1622,16 @@ def test_budgeted_transcript_uses_current_and_tail_history_not_raw_char_prefix()
     assert "OLD_HISTORY_START" not in content
 
 
-def test_image_inputs_are_sanitized_instead_of_strict_zero_422(monkeypatch):
+def test_image_inputs_are_rejected_explicitly_by_default(monkeypatch):
     from fastapi.testclient import TestClient
 
-    import app.main as main
     from app.config import settings
     from app.main import app
-    from app.models import Bill015Result
     from app.state import runtime_state
 
     monkeypatch.setattr(settings, "mode", "exploit")
     monkeypatch.setattr(settings, "strict_zero", True)
     runtime_state.current_mode_override = None
-
-    async def fake_execute(n, mode, local_request_id=None):
-        dumped = json.dumps(n.raw_input, ensure_ascii=False)
-        assert "data:image" not in dumped
-        assert "image_url" not in dumped
-        assert "does not support image/screenshot uploads" in dumped
-        return Bill015Result(local_request_id=local_request_id or "resp_local_test", answer="OK", args_done_seen=True, aborted=True)
-
-    monkeypatch.setattr(main, "execute_bill015", fake_execute)
 
     client = TestClient(app)
     response = client.post(
@@ -1654,8 +1643,56 @@ def test_image_inputs_are_sanitized_instead_of_strict_zero_422(monkeypatch):
         },
     )
 
-    assert response.status_code == 200
-    assert response.json()["output"][0]["content"][0]["text"] == "OK"
+    assert response.status_code == 422
+    assert response.json()["error"]["message"]["code"] == "local_proxy_vision_unsupported"
+
+
+def test_image_inputs_local_extract_mode_is_loss_explicit(monkeypatch):
+    from app.config import settings
+    from app.normalization import sanitize_unsupported_image_inputs
+
+    monkeypatch.setattr(settings, "multimodal_strategy", "local_extract")
+    body, count = sanitize_unsupported_image_inputs(
+        {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AA=="}]}]}
+    )
+    dumped = json.dumps(body, ensure_ascii=False)
+    assert count == 1
+    assert "data:image" not in dumped
+    assert "does not support image/screenshot uploads" in dumped
+
+
+def test_request_aware_tool_selection_keeps_core_and_defers_excess():
+    from app.tool_bridge import select_tool_registry
+
+    shared = {}
+    for i in range(300):
+        name = f"boring_tool_{i}"
+        shared[name] = {"call_type": "function", "output_name": name, "schema": {"description": "generic"}}
+    shared["apply_patch"] = {"call_type": "custom", "output_name": "apply_patch", "schema": {"description": "edit files"}}
+    shared["special_database_lookup"] = {"call_type": "function", "output_name": "special_database_lookup", "schema": {"description": "database lookup"}}
+
+    selected, stats = select_tool_registry(shared, "please do a special database lookup", max_tools=32)
+    assert "apply_patch" in selected
+    assert "special_database_lookup" in selected
+    assert stats["canonical_tool_count"] == 302
+    assert stats["schema_tool_count"] == 32
+    assert stats["deferred_tool_count"] == 270
+    assert stats["dropped_tool_count"] == 0
+
+
+def test_emit_value_integrity_limits_block_oversized_tool_call(monkeypatch):
+    from app.config import settings
+    from app.tool_bridge import parse_function_arguments
+
+    monkeypatch.setattr(settings, "max_tool_argument_chars", 16)
+    raw = json.dumps({"mode": "tool_call", "answer": "", "tool_calls": [{"type": "custom", "name": "apply_patch", "input": "x" * 50, "arguments": "{}"}]})
+    answer, malformed, _, mode, calls = parse_function_arguments(
+        raw, settings, {"apply_patch": {"call_type": "custom", "output_name": "apply_patch", "raw_type": "custom"}}
+    )
+    assert malformed is True
+    assert mode == "answer"
+    assert not calls
+    assert "完整性上限" in answer
 
 
 def test_config_schema_reports_unknown_fields():
@@ -2617,7 +2654,7 @@ def test_context_compaction_aggressive_clips_oversized_latest_user():
     assert payload_input_tokens(compacted) <= 8000
     assert "CURRENT_HEAD" in dumped
     assert "CURRENT_TAIL" in dumped
-    assert "local compaction omitted" in dumped
+    assert "LOCAL LOSSY COMPACTION NOTICE" in dumped
 
 
 def test_context_length_error_matcher():
