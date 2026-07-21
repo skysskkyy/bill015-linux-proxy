@@ -52,9 +52,22 @@ def active_mode() -> str:
 
 
 async def read_json_body(request: Request) -> dict[str, Any]:
-    body = await request.body()
-    if len(body) > settings.max_request_bytes:
-        raise HTTPException(status_code=413, detail="request body too large")
+    limit = max(1, settings.max_request_bytes)
+    raw_content_length = request.headers.get("content-length")
+    if raw_content_length:
+        try:
+            if int(raw_content_length) > limit:
+                raise HTTPException(status_code=413, detail="request body too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid Content-Length header") from None
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if len(body) + len(chunk) > limit:
+            raise HTTPException(status_code=413, detail="request body too large")
+        body.extend(chunk)
     if not body:
         return {}
     try:
@@ -77,33 +90,43 @@ def require_admin(authorization: str | None) -> None:
 async def run_and_record(n: NormalizedRequest, mode: str, local_request_id: str | None = None) -> Bill015Result:
     runtime_state.inc_request()
     start = time.perf_counter()
+    request_id = local_request_id or local_response_id()
     async with semaphore:
         try:
-            result = await execute_bill015(n, mode, local_request_id=local_request_id)
+            result = await execute_bill015(n, mode, local_request_id=request_id)
             runtime_state.mark_success(args_done=result.args_done_seen, aborted=result.aborted)
             audit_logger.write(audit_from_result(result, n, mode))
             return result
         except HTTPException as e:
             runtime_state.mark_error(str(e.detail))
-            audit_logger.write({
-                "local_request_id": local_response_id(),
-                "mode": mode,
-                "client_api": n.client_api,
-                "model": n.model,
-                "duration_ms": int((time.perf_counter() - start) * 1000),
-                "error": e.detail,
-                "prompt_chars": len(n.user_input),
-            })
+            failed_result = getattr(e, "bill015_result", None)
+            if isinstance(failed_result, Bill015Result):
+                record = audit_from_result(failed_result, n, mode)
+                record["error"] = e.detail
+                record["error_type"] = "HTTPException"
+            else:
+                record = {
+                    "local_request_id": request_id,
+                    "mode": mode,
+                    "client_api": n.client_api,
+                    "model": n.model,
+                    "duration_ms": int((time.perf_counter() - start) * 1000),
+                    "error": e.detail,
+                    "error_type": "HTTPException",
+                    "prompt_chars": len(n.user_input),
+                }
+            audit_logger.write(record)
             raise
         except Exception as e:
             runtime_state.mark_error(f"{type(e).__name__}: {e}")
             audit_logger.write({
-                "local_request_id": local_response_id(),
+                "local_request_id": request_id,
                 "mode": mode,
                 "client_api": n.client_api,
                 "model": n.model,
                 "duration_ms": int((time.perf_counter() - start) * 1000),
                 "error": f"{type(e).__name__}: {e}",
+                "error_type": type(e).__name__,
                 "prompt_chars": len(n.user_input),
             })
             raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}") from e

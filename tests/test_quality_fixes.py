@@ -2085,7 +2085,7 @@ def test_execute_bill015_rotates_key_on_http_cyber_policy_under_strict_zero(monk
     assert result.upstream_key_count == 3
     assert result.retry_count == 1
     assert result.retry_reasons == ["cyber_policy:key_switch:1->2"]
-    assert sleeps == [600]
+    assert sleeps == []
 
 
 def test_execute_bill015_rotates_key_on_sse_cyber_policy(monkeypatch):
@@ -2169,7 +2169,7 @@ def test_execute_bill015_rotates_key_on_sse_cyber_policy(monkeypatch):
     assert result.answer == "SSE OK"
     assert result.key_switch_count == 1
     assert result.upstream_response_id is None
-    assert sleeps == [600]
+    assert sleeps == []
 
 
 def test_execute_bill015_stops_after_cyber_policy_exhausts_key_pool(monkeypatch):
@@ -2223,7 +2223,7 @@ def test_execute_bill015_stops_after_cyber_policy_exhausts_key_pool(monkeypatch)
     with __import__("pytest").raises(HTTPException):
         asyncio.run(upstream.execute_bill015(n, "exploit"))
     assert DummyClient.calls == 2
-    assert sleeps == [600, 600]
+    assert sleeps == []
 
 
 def test_normal_forward_json_rotates_only_for_cyber_policy(monkeypatch):
@@ -2264,17 +2264,9 @@ def test_normal_forward_json_rotates_only_for_cyber_policy(monkeypatch):
     _configure_test_key_pool(monkeypatch, settings, "sk-json-1", ["sk-json-2"])
     monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
     monkeypatch.setattr(upstream_client.httpx, "AsyncClient", DummyClient)
-    sleeps = []
-
-    async def fake_sleep(seconds):
-        sleeps.append(seconds)
-
-    monkeypatch.setattr(upstream_client.asyncio, "sleep", fake_sleep)
-
     result = asyncio.run(upstream_client.normal_forward_json({"model": "gpt-test", "input": "hello"}))
     assert result == {"id": "resp_ok"}
     assert DummyClient.authorizations == ["Bearer sk-json-1", "Bearer sk-json-2"]
-    assert sleeps == [600]
 
 
 

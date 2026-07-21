@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import copy
 import time
 from collections.abc import Mapping
@@ -177,8 +176,11 @@ async def _next_key_after_rotation_error(
     tried_keys: set[str],
     cfg: Settings,
 ) -> ApiKeySelection | None:
-    await asyncio.sleep(KEY_ROTATION_DELAY_SECONDS)
-    next_selection = upstream_key_pool(cfg).rotate_after_failure(selection.key, tried_keys)
+    next_selection = upstream_key_pool(cfg).rotate_after_failure(
+        selection.key,
+        tried_keys,
+        cooldown_seconds=KEY_ROTATION_DELAY_SECONDS,
+    )
     if next_selection is not None:
         tried_keys.add(next_selection.key)
     return next_selection

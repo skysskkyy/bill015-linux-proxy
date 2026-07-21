@@ -551,8 +551,21 @@ async def _rotate_after_key_error_with_delay(
     reason: str,
     cfg: Settings,
 ) -> ApiKeySelection | None:
-    await asyncio.sleep(KEY_ROTATION_DELAY_SECONDS)
-    return _rotate_after_key_error(result, selection, tried_keys, reason, cfg)
+    next_selection = upstream_key_pool(cfg).rotate_after_failure(
+        selection.key,
+        tried_keys,
+        cooldown_seconds=KEY_ROTATION_DELAY_SECONDS,
+    )
+    if next_selection is None:
+        return None
+    tried_keys.add(next_selection.key)
+    result.retry_count += 1
+    result.key_switch_count += 1
+    audit_reason = f"{reason}:key_switch:{selection.index + 1}->{next_selection.index + 1}"
+    result.retry_reasons.append(audit_reason)
+    result.event_sequence.append(f"retry:{audit_reason}")
+    _record_key_selection(result, next_selection)
+    return next_selection
 
 def _reset_result_for_key_retry(result: Bill015Result) -> None:
     result.upstream_response_id = None
@@ -967,7 +980,11 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
         if result.error:
             raise HTTPException(status_code=502, detail={"message": result.error, "code": "upstream_empty_completion"})
         return result
-    except HTTPException:
+    except HTTPException as e:
+        if not result.error:
+            detail = e.detail
+            result.error = json.dumps(detail, ensure_ascii=False)[:2000] if isinstance(detail, (dict, list)) else str(detail)[:2000]
+        e.bill015_result = result
         raise
     except Exception as e:
         result.error = f"{type(e).__name__}: {e}"

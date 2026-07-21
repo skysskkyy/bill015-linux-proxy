@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict
@@ -69,7 +70,8 @@ class AuditLogger:
         if not self.path.exists() or self.path.stat().st_size < self.rotate_bytes:
             return
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        self.path.rename(self.directory / f"audit_{stamp}.jsonl")
+        rotated = self.directory / f"audit_{stamp}_{time.time_ns()}_{uuid.uuid4().hex[:8]}.jsonl"
+        self.path.rename(rotated)
 
     def write(self, record: Dict[str, Any]) -> None:
         safe = redact(record)
@@ -81,13 +83,27 @@ class AuditLogger:
                 f.write(line + os.linesep)
 
     def recent(self, n: int = 20) -> list[Dict[str, Any]]:
-        if not self.path.exists():
-            return []
-        try:
-            lines = self.path.read_text(encoding="utf-8", errors="replace").splitlines()[-max(1, min(n, 200)):]
-            return [json.loads(x) for x in lines if x.strip()]
-        except Exception:
-            return []
+        limit = max(1, min(n, 200))
+        with self._lock:
+            files = sorted(self.directory.glob("audit_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if self.path.exists():
+                files.insert(0, self.path)
+            records: list[Dict[str, Any]] = []
+            for path in files:
+                try:
+                    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    continue
+                for line in reversed(lines):
+                    if not line.strip():
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+                    if len(records) >= limit:
+                        return list(reversed(records))
+            return list(reversed(records))
 
 
 audit_logger = AuditLogger(settings.evidence_dir, settings.rotate_mb)
