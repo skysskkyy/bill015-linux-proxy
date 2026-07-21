@@ -83,6 +83,9 @@ class ResponsesEventsConfig(StrictConfigModel):
 
 class LimitsConfig(StrictConfigModel):
     max_concurrency: int | None = None
+    max_queue_size: int | None = None
+    queue_wait_timeout_ms: int | None = None
+    request_total_timeout_ms: int | None = None
     max_request_bytes: int | None = None
     upstream_retries: int | None = None
     upstream_retry_backoff_ms: int | None = None

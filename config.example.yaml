@@ -9,7 +9,7 @@ upstream:
   base_url: https://packyapi.com
   api_key_env: PACKY_API_KEY
   api_keys: []
-  timeout_seconds: 900
+  timeout_seconds: 600
 
 mode: exploit
 
@@ -81,19 +81,22 @@ tool_bridge:
   schema_max_tools: 256
 
 limits:
-  max_concurrency: 4
+  max_concurrency: 12
+  max_queue_size: 8
+  queue_wait_timeout_ms: 60000
+  request_total_timeout_ms: 1200000
   max_request_bytes: 1048576
   upstream_retries: 2
   upstream_retry_backoff_ms: 700
   context_window_tokens: 128000
   auto_compact_percent: 90
   compact_target_percent: 75
-  context_recovery_retries: 3
-  empty_stream_retries: 2
-  stream_recovery_retries: 2
+  context_recovery_retries: 2
+  empty_stream_retries: 1
+  stream_recovery_retries: 1
   latest_tool_output_max_chars: 12000
-  args_done_timeout_ms: 900000
-  upstream_idle_timeout_ms: 900000
+  args_done_timeout_ms: 600000
+  upstream_idle_timeout_ms: 300000
   circuit_failures: 0
   client_heartbeat_interval_ms: 5000
 

@@ -143,7 +143,10 @@ class Settings:
     reasoning_summary: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_SUMMARY", "reasoning.summary", ""))
     max_answer_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_ANSWER_CHARS", "bill015.max_answer_chars", 65536))
     max_request_bytes: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_REQUEST_BYTES", "limits.max_request_bytes", 1048576))
-    max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 4))
+    max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 12))
+    max_queue_size: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_QUEUE_SIZE", "limits.max_queue_size", 8))
+    queue_wait_timeout_ms: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_QUEUE_WAIT_TIMEOUT_MS", "limits.queue_wait_timeout_ms", 60000))
+    request_total_timeout_ms: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_REQUEST_TOTAL_TIMEOUT_MS", "limits.request_total_timeout_ms", 1200000))
     # 0 means disabled/infinite. Positive values are enforced by upstream.py.
     upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 900.0))
     upstream_retries: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRIES", "limits.upstream_retries", 2))

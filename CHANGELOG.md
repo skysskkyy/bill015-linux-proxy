@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.12] - 2026-07-21
+
+### Added
+- Raised the default active upstream concurrency to 12 and added an 8-request bounded queue.
+- Added a 60-second queue wait deadline and a 20-minute total execution deadline across all retries and key rotations.
+- Added active/queued/rejected/queue-timeout/request-timeout metrics to `/metrics` and `/healthz`.
+- Streaming generators now cancel unfinished local/upstream work when the client disconnects.
+
+### Changed
+- Reduced default idle/argument deadlines and recovery counts so independent recovery paths cannot hold all worker slots indefinitely.
+
+### Tests
+- Added capacity, queue overflow, queue timeout, total request timeout, and slot-release regressions.
+
 ## [0.4.11] - 2026-07-21
 
 ### Changed

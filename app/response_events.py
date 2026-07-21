@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Any, AsyncIterator
 
 from fastapi import HTTPException
@@ -262,6 +263,11 @@ async def responses_sse_generator(result_coro, n: NormalizedRequest, rid: str | 
         for chunk in stream.failed_events(err):
             yield chunk
         yield b"data: [DONE]\n\n"
+    finally:
+        if task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 def _stream_metadata(n: NormalizedRequest) -> dict[str, Any]:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
+from contextlib import suppress
 from typing import Any, AsyncIterator
 
 from fastapi import HTTPException
@@ -12,8 +14,9 @@ from .usage_estimator import build_chat_usage
 
 
 async def chat_sse_generator(result_coro, n: NormalizedRequest) -> AsyncIterator[bytes]:
+    task = asyncio.ensure_future(result_coro)
     try:
-        result: Bill015Result = await result_coro
+        result: Bill015Result = await task
         finish_reason = "tool_calls" if result.bridge_mode == "tool_call" and result.tool_calls else "stop"
         initial_delta: dict[str, Any] = {"role": "assistant"}
         if finish_reason == "tool_calls" and not result.answer:
@@ -32,6 +35,11 @@ async def chat_sse_generator(result_coro, n: NormalizedRequest) -> AsyncIterator
     except Exception as e:
         yield encode_sse({"error": {"message": f"{type(e).__name__}: {e}", "code": 502, "type": "local_proxy_error"}})
         yield b"data: [DONE]\n\n"
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 def chat_json(result: Bill015Result, n: NormalizedRequest) -> dict[str, Any]:

@@ -24,6 +24,7 @@
 - `0.4.9` 起：补强 GPT-5.6 能力保真：保留 Codex `model_reasoning_effort` 别名、GPT-5.6 默认 high reasoning；修复 CLI custom `exec` 工具在 `input=""` 时吞掉 `arguments` 的问题；工具 schema 从旧 96 上限提高并优先保留 `exec/apply_patch/tool_search/browser/node_repl/subagent` 等核心工具。
 - `0.4.10` 起：优化本地热路径耗时：小/中型请求跳过不必要的精确 payload token 预检，复用已解析的工具历史，并减少大文本裁剪/最新用户消息省略时的重复扫描；上下文压缩、工具桥接和 strict-zero 语义不变。
 - `0.4.11` 起：把含义混杂的 `strict_zero` 拆为 `force_emit_value`、`block_passthrough`、`block_normal_mode` 三个安全桥策略；这些开关不再禁用错误重试。`cyber_policy` 会立即切换下一把 Key 重跑，并让失败 Key 冷却一段时间。
+- `0.4.12` 起：并发工作槽提升到 12，增加 8 个有界排队位、60 秒排队超时和 20 分钟请求总时限；客户端断开会取消未完成的上游任务，并在健康指标中显示活跃、排队和超时数量。
 - `0.4.1` 起：支持多 API key 池；当上游错误字段为 `error.code="cyber_policy"` 且 `error.message` 为完整 cybersecurity-risk 提示时，等待 10 分钟后自动切换下一把 key 并继续原请求。
 - `0.4.2` 起：参考 Codex CLI 的上下文窗口机制，在 90% 阈值前预压缩；遇到 `context_length_exceeded` 时从最旧历史开始裁剪并重跑，同时保留最新用户请求和最新工具批次；reasoning-only 空流改为有限重试，不再伪装成成功回答。
 - 本阶段不做 Codex 配置接入
@@ -284,12 +285,18 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
   "timeout_seconds": 900
 },
 "limits": {
+  "max_concurrency": 12,
+  "max_queue_size": 8,
+  "queue_wait_timeout_ms": 60000,
+  "request_total_timeout_ms": 1200000,
   "args_done_timeout_ms": 900000,
   "upstream_idle_timeout_ms": 900000,
   "stream_recovery_retries": 2,
   "upstream_retries": 2
 }
 ```
+
+容量规则：最多 12 个请求同时访问上游，另有 8 个排队位。队列满时立即返回 429；排队超过 60 秒返回 503；拿到工作槽后，无论普通重试、流恢复还是 Key 轮换，总执行时间超过 20 分钟都会返回 504 并释放槽位。`/metrics` 可查看 `active_requests`、`queued_requests`、`rejected_busy_total`、`queue_timeout_total` 和 `request_timeout_total`。
 
 如果要做超长重构/长补丁，可以临时把 `bill015.max_output_tokens` 和 `bill015.compaction_max_output_tokens` 调到 `16384`。
 

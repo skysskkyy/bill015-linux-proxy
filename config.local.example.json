@@ -13,7 +13,7 @@
     ],
     "cookie": "",
     "user_id": "192833",
-    "timeout_seconds": 900
+    "timeout_seconds": 600
   },
   "mode": "exploit",
   "model": {
@@ -70,15 +70,20 @@
     "chunk_size": 256
   },
   "limits": {
-    "max_concurrency": 4,
+    "max_concurrency": 12,
+    "max_queue_size": 8,
+    "queue_wait_timeout_ms": 60000,
+    "request_total_timeout_ms": 1200000,
     "max_request_bytes": 1048576,
     "upstream_retries": 2,
     "upstream_retry_backoff_ms": 700,
-    "args_done_timeout_ms": 900000,
-    "upstream_idle_timeout_ms": 900000,
+    "args_done_timeout_ms": 600000,
+    "upstream_idle_timeout_ms": 300000,
     "circuit_failures": 0,
     "client_heartbeat_interval_ms": 5000,
-    "stream_recovery_retries": 2
+    "context_recovery_retries": 2,
+    "empty_stream_retries": 1,
+    "stream_recovery_retries": 1
   },
   "key_pool": {
     "cyber_policy_rotate": true,

@@ -18,6 +18,11 @@ class RuntimeState:
     consecutive_failures: int = 0
     last_error: str | None = None
     current_mode_override: str | None = None
+    active_requests: int = 0
+    queued_requests: int = 0
+    rejected_busy_total: int = 0
+    queue_timeout_total: int = 0
+    request_timeout_total: int = 0
     lock: Lock = field(default_factory=Lock)
 
     def snapshot(self) -> Dict[str, Any]:
@@ -33,6 +38,11 @@ class RuntimeState:
                 "consecutive_failures": self.consecutive_failures,
                 "last_error": self.last_error,
                 "mode_override": self.current_mode_override,
+                "active_requests": self.active_requests,
+                "queued_requests": self.queued_requests,
+                "rejected_busy_total": self.rejected_busy_total,
+                "queue_timeout_total": self.queue_timeout_total,
+                "request_timeout_total": self.request_timeout_total,
             }
 
     def inc_request(self) -> None:
@@ -57,6 +67,32 @@ class RuntimeState:
     def mark_fallback(self) -> None:
         with self.lock:
             self.fallback_count += 1
+
+    def mark_queued(self) -> None:
+        with self.lock:
+            self.queued_requests += 1
+
+    def mark_queue_left(self, *, active: bool = False) -> None:
+        with self.lock:
+            self.queued_requests = max(0, self.queued_requests - 1)
+            if active:
+                self.active_requests += 1
+
+    def mark_active_finished(self) -> None:
+        with self.lock:
+            self.active_requests = max(0, self.active_requests - 1)
+
+    def mark_busy_rejected(self) -> None:
+        with self.lock:
+            self.rejected_busy_total += 1
+
+    def mark_queue_timeout(self) -> None:
+        with self.lock:
+            self.queue_timeout_total += 1
+
+    def mark_request_timeout(self) -> None:
+        with self.lock:
+            self.request_timeout_total += 1
 
 
 runtime_state = RuntimeState()

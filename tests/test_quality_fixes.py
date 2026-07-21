@@ -160,6 +160,69 @@ def test_legacy_strict_zero_environment_controls_safe_bridge_defaults(tmp_path):
     assert proc.stdout.strip() == "False False False"
 
 
+def test_capacity_limiter_bounds_active_and_queue_and_releases_cleanly():
+    from app.capacity import CapacityLimiter, QueueFullError, QueueWaitTimeoutError
+    from app.state import RuntimeState
+
+    async def run():
+        state = RuntimeState()
+        limiter = CapacityLimiter(max_active=1, max_queue=1, queue_timeout_ms=20, state=state)
+        first = await limiter.acquire()
+        second_task = asyncio.create_task(limiter.acquire())
+        await asyncio.sleep(0)
+        with __import__("pytest").raises(QueueFullError):
+            await limiter.acquire()
+        with __import__("pytest").raises(QueueWaitTimeoutError):
+            await second_task
+        assert state.snapshot()["active_requests"] == 1
+        assert state.snapshot()["queued_requests"] == 0
+        assert state.snapshot()["rejected_busy_total"] == 1
+        assert state.snapshot()["queue_timeout_total"] == 1
+        await first.release()
+        assert state.snapshot()["active_requests"] == 0
+        replacement = await limiter.acquire()
+        await replacement.release()
+        return state.snapshot()
+
+    snapshot = asyncio.run(run())
+    assert snapshot["active_requests"] == 0
+    assert snapshot["queued_requests"] == 0
+
+
+def test_run_and_record_total_timeout_releases_capacity(monkeypatch):
+    from app import main
+    from app.capacity import CapacityLimiter
+    from app.models import NormalizedRequest
+    from app.state import RuntimeState
+
+    state = RuntimeState()
+    limiter = CapacityLimiter(max_active=1, max_queue=0, queue_timeout_ms=20, state=state)
+    monkeypatch.setattr(main, "runtime_state", state)
+    monkeypatch.setattr(main, "capacity_limiter", limiter)
+    monkeypatch.setattr(main.settings, "request_total_timeout_ms", 10)
+    monkeypatch.setattr(main.audit_logger, "write", lambda record: None)
+
+    async def never_finishes(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(main, "execute_bill015", never_finishes)
+    request = NormalizedRequest(
+        model="gpt-test",
+        instructions="",
+        user_input="x",
+        want_stream=False,
+        client_api="responses",
+        is_primary_path=True,
+    )
+
+    with __import__("pytest").raises(HTTPException) as exc:
+        asyncio.run(main.run_and_record(request, "exploit"))
+    assert exc.value.status_code == 504
+    snapshot = state.snapshot()
+    assert snapshot["active_requests"] == 0
+    assert snapshot["request_timeout_total"] == 1
+
+
 def test_strict_unknown_tool_schema_disables_tui_dynamic_discovery_without_registry(monkeypatch):
     from app.config import settings
     from app.payloads import build_emit_value_schema

@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .audit import audit_logger
+from .capacity import CapacityLimiter, QueueFullError, QueueWaitTimeoutError
 from .chat_events import chat_json, chat_sse_generator
 from .config import settings
 from .key_pool import upstream_key_pool
@@ -40,7 +41,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-semaphore = asyncio.Semaphore(settings.max_concurrency)
+capacity_limiter = CapacityLimiter(settings.max_concurrency, settings.max_queue_size, settings.queue_wait_timeout_ms, runtime_state)
 
 
 def active_mode() -> str:
@@ -91,12 +92,59 @@ async def run_and_record(n: NormalizedRequest, mode: str, local_request_id: str 
     runtime_state.inc_request()
     start = time.perf_counter()
     request_id = local_request_id or local_response_id()
-    async with semaphore:
+    try:
+        lease = await capacity_limiter.acquire()
+    except QueueFullError as e:
+        runtime_state.mark_error("proxy queue is full")
+        audit_logger.write({
+            "local_request_id": request_id,
+            "mode": mode,
+            "client_api": n.client_api,
+            "model": n.model,
+            "duration_ms": int((time.perf_counter() - start) * 1000),
+            "error": "proxy queue is full",
+            "error_type": "QueueFullError",
+            "prompt_chars": len(n.user_input),
+        })
+        raise HTTPException(status_code=429, detail="proxy queue is full; retry later") from e
+    except QueueWaitTimeoutError as e:
+        runtime_state.mark_error("proxy queue wait timed out")
+        audit_logger.write({
+            "local_request_id": request_id,
+            "mode": mode,
+            "client_api": n.client_api,
+            "model": n.model,
+            "duration_ms": int((time.perf_counter() - start) * 1000),
+            "error": "proxy queue wait timed out",
+            "error_type": "QueueWaitTimeoutError",
+            "prompt_chars": len(n.user_input),
+        })
+        raise HTTPException(status_code=503, detail="proxy stayed busy longer than queue_wait_timeout_ms; retry later") from e
+
+    try:
         try:
-            result = await execute_bill015(n, mode, local_request_id=request_id)
+            async with asyncio.timeout(max(0.001, settings.request_total_timeout_ms / 1000)):
+                result = await execute_bill015(n, mode, local_request_id=request_id)
             runtime_state.mark_success(args_done=result.args_done_seen, aborted=result.aborted)
-            audit_logger.write(audit_from_result(result, n, mode))
+            record = audit_from_result(result, n, mode)
+            record["queue_wait_ms"] = lease.queue_wait_ms
+            audit_logger.write(record)
             return result
+        except TimeoutError as e:
+            runtime_state.mark_request_timeout()
+            runtime_state.mark_error("proxy request exceeded request_total_timeout_ms")
+            audit_logger.write({
+                "local_request_id": request_id,
+                "mode": mode,
+                "client_api": n.client_api,
+                "model": n.model,
+                "duration_ms": int((time.perf_counter() - start) * 1000),
+                "queue_wait_ms": lease.queue_wait_ms,
+                "error": "proxy request exceeded request_total_timeout_ms",
+                "error_type": "RequestTotalTimeout",
+                "prompt_chars": len(n.user_input),
+            })
+            raise HTTPException(status_code=504, detail="proxy request exceeded request_total_timeout_ms") from e
         except HTTPException as e:
             runtime_state.mark_error(str(e.detail))
             failed_result = getattr(e, "bill015_result", None)
@@ -115,6 +163,7 @@ async def run_and_record(n: NormalizedRequest, mode: str, local_request_id: str 
                     "error_type": "HTTPException",
                     "prompt_chars": len(n.user_input),
                 }
+            record["queue_wait_ms"] = lease.queue_wait_ms
             audit_logger.write(record)
             raise
         except Exception as e:
@@ -127,9 +176,12 @@ async def run_and_record(n: NormalizedRequest, mode: str, local_request_id: str 
                 "duration_ms": int((time.perf_counter() - start) * 1000),
                 "error": f"{type(e).__name__}: {e}",
                 "error_type": type(e).__name__,
+                "queue_wait_ms": lease.queue_wait_ms,
                 "prompt_chars": len(n.user_input),
             })
             raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}") from e
+    finally:
+        await lease.release()
 
 
 async def synthetic_result(answer: str, n: NormalizedRequest) -> Bill015Result:
@@ -157,6 +209,9 @@ async def healthz() -> dict[str, Any]:
         "host": settings.host,
         "port": settings.port,
         "max_concurrency": settings.max_concurrency,
+        "max_queue_size": settings.max_queue_size,
+        "queue_wait_timeout_ms": settings.queue_wait_timeout_ms,
+        "request_total_timeout_ms": settings.request_total_timeout_ms,
         "strict_zero": settings.strict_zero,
         "safe_bridge": {
             "force_emit_value": settings.force_emit_value,
