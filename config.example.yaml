@@ -30,7 +30,9 @@ bill015:
   max_output_tokens: 8192
   compaction_max_output_tokens: 8192
   max_answer_chars: 65536
-  strict_zero: true
+  force_emit_value: true
+  block_passthrough: true
+  block_normal_mode: true
 
 logging:
   dir: S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence
@@ -81,7 +83,7 @@ tool_bridge:
 limits:
   max_concurrency: 4
   max_request_bytes: 1048576
-  upstream_retries: 0
+  upstream_retries: 2
   upstream_retry_backoff_ms: 700
   context_window_tokens: 128000
   auto_compact_percent: 90
@@ -94,6 +96,12 @@ limits:
   upstream_idle_timeout_ms: 900000
   circuit_failures: 0
   client_heartbeat_interval_ms: 5000
+
+key_pool:
+  # On an exact cyber_policy error, immediately retry the request with the next
+  # available key and quarantine the failed key for this many seconds.
+  cyber_policy_rotate: true
+  failed_key_cooldown_seconds: 600
 
 admin:
   token: change-me-local-admin

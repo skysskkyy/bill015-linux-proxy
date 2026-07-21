@@ -35,7 +35,9 @@
     "answer_field": "answer",
     "max_output_tokens": 8192,
     "max_answer_chars": 65536,
-    "strict_zero": true,
+    "force_emit_value": true,
+    "block_passthrough": true,
+    "block_normal_mode": true,
     "compaction_max_output_tokens": 8192
   },
   "logging": {
@@ -70,13 +72,17 @@
   "limits": {
     "max_concurrency": 4,
     "max_request_bytes": 1048576,
-    "upstream_retries": 0,
+    "upstream_retries": 2,
     "upstream_retry_backoff_ms": 700,
     "args_done_timeout_ms": 900000,
     "upstream_idle_timeout_ms": 900000,
     "circuit_failures": 0,
     "client_heartbeat_interval_ms": 5000,
     "stream_recovery_retries": 2
+  },
+  "key_pool": {
+    "cyber_policy_rotate": true,
+    "failed_key_cooldown_seconds": 600
   },
   "admin": {
     "token": "change-me-local-admin"

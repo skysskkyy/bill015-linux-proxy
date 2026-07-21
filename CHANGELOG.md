@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.11] - 2026-07-21
+
+### Changed
+- Split the overloaded `strict_zero` behavior into independent safe-bridge controls: `force_emit_value`, `block_passthrough`, and `block_normal_mode`. Legacy `strict_zero` remains as a compatibility fallback when the new fields are absent.
+- Enabled pre-stream HTTP/network retries by default (`upstream_retries=2`) even while the safe `emit_value` bridge and passthrough guards remain enabled.
+- Cyber-policy rotation now immediately retries with the next available key and quarantines the failed key for the configurable `key_pool.failed_key_cooldown_seconds` (default 600), rather than sleeping the whole request.
+
+### Tests
+- Added regression coverage proving pre-stream HTTP 5xx retries remain active with the safe bridge enabled; the full offline suite passes.
+
 ## [0.4.10] - 2026-07-16
 
 ### Changed

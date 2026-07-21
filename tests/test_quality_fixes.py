@@ -129,7 +129,35 @@ def test_unknown_tools_disabled_by_default_without_local_config(tmp_path):
     )
 
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == "False 8192 8192 65536 900.0 900000 900000 0   False"
+    assert proc.stdout.strip() == "False 8192 8192 65536 900.0 900000 900000 2   False"
+
+
+def test_legacy_strict_zero_environment_controls_safe_bridge_defaults(tmp_path):
+    env = os.environ.copy()
+    env["BILL015_CONFIG_PATH"] = str(tmp_path / "missing-config.json")
+    env["BILL015_STRICT_ZERO"] = "false"
+    env.pop("BILL015_FORCE_EMIT_VALUE", None)
+    env.pop("BILL015_BLOCK_PASSTHROUGH", None)
+    env.pop("BILL015_BLOCK_NORMAL_MODE", None)
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from app.config import settings; "
+                "print(settings.force_emit_value, settings.block_passthrough, settings.block_normal_mode)"
+            ),
+        ],
+        cwd=os.getcwd(),
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.strip() == "False False False"
 
 
 def test_strict_unknown_tool_schema_disables_tui_dynamic_discovery_without_registry(monkeypatch):
@@ -540,6 +568,7 @@ def test_native_tool_first_payload_exposes_real_tools_and_final_answer(monkeypat
 
     monkeypatch.setattr(settings, "bridge_strategy", "native_tool_first")
     monkeypatch.setattr(settings, "strict_zero", False)
+    monkeypatch.setattr(settings, "force_emit_value", False)
     monkeypatch.setattr(settings, "final_answer_tool_name", "submit_final_answer")
     monkeypatch.setattr(settings, "native_tool_choice", "required")
     tools = [
@@ -954,6 +983,7 @@ def test_responses_lite_non_strict_still_uses_codex_lite_transport(monkeypatch):
 
     monkeypatch.setattr(settings, "bridge_strategy", "emit_value")
     monkeypatch.setattr(settings, "strict_zero", False)
+    monkeypatch.setattr(settings, "force_emit_value", False)
 
     body = {
         "model": "gpt-5.6-sol",
@@ -1750,7 +1780,7 @@ def test_normal_forward_stream_non_200_emits_response_failed_done(monkeypatch):
     assert "<html" not in text.lower()
 
 
-def test_execute_bill015_retries_pre_stream_http_500(monkeypatch):
+def test_execute_bill015_retries_pre_stream_http_500_with_safe_bridge(monkeypatch):
     from app import upstream
     from app.config import settings
     from app.models import NormalizedRequest
@@ -1805,7 +1835,8 @@ def test_execute_bill015_retries_pre_stream_http_500(monkeypatch):
     monkeypatch.setattr(settings, "upstream_base_url", "https://example.invalid")
     monkeypatch.setattr(settings, "upstream_retries", 2)
     monkeypatch.setattr(settings, "upstream_retry_backoff_ms", 0)
-    monkeypatch.setattr(settings, "strict_zero", False)
+    monkeypatch.setattr(settings, "strict_zero", True)
+    monkeypatch.setattr(settings, "force_emit_value", True)
     monkeypatch.setattr(upstream.httpx, "AsyncClient", DummyClient)
 
     n = NormalizedRequest(model="gpt-test", instructions="", user_input="Return OK", want_stream=False, client_api="responses", is_primary_path=True)

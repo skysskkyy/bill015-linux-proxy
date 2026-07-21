@@ -23,6 +23,7 @@
 - `0.4.8` 起：对“上网查/联网搜索/打开 URL/latest/current”等明确实时网页需求增加本地网络检索任务流：优先使用已暴露的 Chrome/Browser/Playwright/node_repl/jshook 工具；只有缺少具体浏览器工具但存在 `tool_search` 时，代理先本地返回 `tool_search_call` 做发现，不走上游 `web_search`。
 - `0.4.9` 起：补强 GPT-5.6 能力保真：保留 Codex `model_reasoning_effort` 别名、GPT-5.6 默认 high reasoning；修复 CLI custom `exec` 工具在 `input=""` 时吞掉 `arguments` 的问题；工具 schema 从旧 96 上限提高并优先保留 `exec/apply_patch/tool_search/browser/node_repl/subagent` 等核心工具。
 - `0.4.10` 起：优化本地热路径耗时：小/中型请求跳过不必要的精确 payload token 预检，复用已解析的工具历史，并减少大文本裁剪/最新用户消息省略时的重复扫描；上下文压缩、工具桥接和 strict-zero 语义不变。
+- `0.4.11` 起：把含义混杂的 `strict_zero` 拆为 `force_emit_value`、`block_passthrough`、`block_normal_mode` 三个安全桥策略；这些开关不再禁用错误重试。`cyber_policy` 会立即切换下一把 Key 重跑，并让失败 Key 冷却一段时间。
 - `0.4.1` 起：支持多 API key 池；当上游错误字段为 `error.code="cyber_policy"` 且 `error.message` 为完整 cybersecurity-risk 提示时，等待 10 分钟后自动切换下一把 key 并继续原请求。
 - `0.4.2` 起：参考 Codex CLI 的上下文窗口机制，在 90% 阈值前预压缩；遇到 `context_length_exceeded` 时从最旧历史开始裁剪并重跑，同时保留最新用户请求和最新工具批次；reasoning-only 空流改为有限重试，不再伪装成成功回答。
 - 本阶段不做 Codex 配置接入
@@ -72,7 +73,9 @@ S:\hack\packyapi.com\bill015_local_proxy\config.local.example.json
   "bill015": {
     "bridge_strategy": "emit_value",
     "final_answer_tool_name": "submit_final_answer",
-    "strict_zero": true
+    "force_emit_value": true,
+    "block_passthrough": true,
+    "block_normal_mode": true
   },
   "tool_bridge": {
     "allow_unknown_tools": false
@@ -84,9 +87,9 @@ S:\hack\packyapi.com\bill015_local_proxy\config.local.example.json
 
 保留 `upstream.api_key` 作为首选 key，并在 `upstream.api_keys` 中按顺序配置额外 key。代理会去重后形成进程级密钥池。
 
-当前轮询只针对日志中确认的上游 cyber policy 错误字段：SSE/JSON 错误对象中 `error.code="cyber_policy"`，且 `error.message` 等于完整的 `This content was flagged for possible cybersecurity risk... https://chatgpt.com/cyber` 提示。命中后，代理先等待 10 分钟，再切到下一把尚未在本次请求中尝试过的 key，并用原请求继续工作。其他 HTTP、网络或模型错误保持原有处理逻辑。
+当前轮询只针对日志中确认的上游 cyber policy 错误字段：SSE/JSON 错误对象中 `error.code="cyber_policy"`，且 `error.message` 等于完整的 `This content was flagged for possible cybersecurity risk... https://chatgpt.com/cyber` 提示。命中后，代理立即切到下一把尚未在本次请求中尝试过的 Key，并用原请求继续工作；失败 Key 默认进入 600 秒冷却，不会阻塞当前请求等待。
 
-该专用切换在 `bill015.strict_zero=true` 时仍生效；它不受通用 `upstream_retries` 开关控制。每个 key 在一次请求中最多尝试一次，全部耗尽后返回最后一个上游错误，不会无限循环。
+该专用切换由 `key_pool.cyber_policy_rotate` 控制，不受通用 `upstream_retries` 开关控制。每个 Key 在一次请求中最多尝试一次，全部耗尽后返回最后一个上游错误，不会无限循环。冷却时间由 `key_pool.failed_key_cooldown_seconds` 控制。
 
 健康检查只暴露 key 数量、当前序号和不可逆短指纹，不返回完整 key；审计日志记录 `upstream_key_index`、`upstream_key_count` 和 `key_switch_count`。
 
@@ -97,6 +100,10 @@ S:\hack\packyapi.com\bill015_local_proxy\config.local.example.json
   "upstream": {
     "api_key": "PRIMARY_KEY",
     "api_keys": ["SECOND_KEY", "THIRD_KEY"]
+  },
+  "key_pool": {
+    "cyber_policy_rotate": true,
+    "failed_key_cooldown_seconds": 600
   }
 }
 ```
@@ -182,15 +189,23 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 
 日志不记录完整上游 API key/Cookie；默认不记录 prompt，也默认不记录 answer；如需本地留存回答，可在 `config.local.json` 里将 `logging.store_answers` 改为 `true`。
 
-## 严格不扣量模式
+## 安全桥策略与自动重试
 
-默认配置 `bill015.strict_zero=true` 会 fail-closed：
+默认安全桥配置为：
+
+```json
+"bill015": {
+  "force_emit_value": true,
+  "block_passthrough": true,
+  "block_normal_mode": true
+}
+```
 
 - 阻断 `auto-passthrough`：例如图片/文件等当前桥接层无法安全 early-abort 的原生请求，不再偷偷普通转发上游。
 - 阻断 `normal` 模式：防止运行时误切换到普通转发。
-- 禁用上游重试：避免一次用户请求产生第二次真实上游生成尝试。
+- 强制使用 `emit_value` 提前断开策略。
 
-如果你明确要牺牲“不扣量”来换原生多媒体/文件能力，再手动改成 `false`。
+这些安全桥开关与重试相互独立。预流式 HTTP 5xx、连接错误可以按 `limits.upstream_retries` 自动重试；空流、流超时和上下文错误仍由各自恢复配置控制。旧的 `strict_zero` 字段仅作为兼容回退，新配置不应再使用它。
 
 ## 工具桥严格模式
 
@@ -209,8 +224,8 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 
 - 上游只看到一个强制 `emit_value` function tool；代理在 `response.function_call_arguments.done` 立刻断开。
 - `emit_value.tool_calls` 仍会按本轮 Codex 工具 registry 生成强类型 schema，避免完全靠自然语言描述工具。
-- `bill015.strict_zero=true` 时，即使配置了 `"native_tool_first"`，运行时也会 fail-closed 回落到 `"emit_value"`。
-- 如需实验更原生的工具选择，可同时设置 `"bridge_strategy": "native_tool_first"` 和 `"strict_zero": false`；注意这可能产生上游用量记录。
+- `bill015.force_emit_value=true` 时，即使配置了 `"native_tool_first"`，运行时也会回落到 `"emit_value"`。
+- 如需实验更原生的工具选择，可同时设置 `"bridge_strategy": "native_tool_first"` 和 `"force_emit_value": false`；注意这可能产生上游用量记录。
 
 默认配置：
 
@@ -272,7 +287,7 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
   "args_done_timeout_ms": 900000,
   "upstream_idle_timeout_ms": 900000,
   "stream_recovery_retries": 2,
-  "upstream_retries": 0
+  "upstream_retries": 2
 }
 ```
 
@@ -280,7 +295,7 @@ S:\hack\packyapi.com\bill015_local_proxy\proxy_evidence\audit.jsonl
 
 ## 502 / 上游 500 稳定性
 
-默认 `upstream_retries=0`，避免一次用户请求产生多次真实上游尝试。如果你明确要牺牲严格不扣量语义来换稳定性，可手动开启预流式失败重试：
+默认 `upstream_retries=2`，用于恢复尚未收到任何上游 SSE 事件时的 HTTP 5xx 和网络失败。一旦已收到上游事件，普通预流式重试不会执行，避免重复工具意图；流中断使用单独的 `stream_recovery_retries`。
 
 ```json
 "limits": {

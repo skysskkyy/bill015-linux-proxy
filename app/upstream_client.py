@@ -12,9 +12,11 @@ from .config import Settings, settings
 from .key_pool import ApiKeySelection, upstream_key_pool
 from .models import local_response_id
 from .sse import encode_sse
-from .upstream_errors import error_message_from_detail, key_rotation_error_reason, sanitize_upstream_error_detail
-
-KEY_ROTATION_DELAY_SECONDS = 10 * 60
+from .upstream_errors import (
+    error_message_from_detail,
+    key_rotation_error_reason,
+    sanitize_upstream_error_detail,
+)
 
 
 def http_timeout(cfg: Settings = settings) -> httpx.Timeout | None:
@@ -176,10 +178,12 @@ async def _next_key_after_rotation_error(
     tried_keys: set[str],
     cfg: Settings,
 ) -> ApiKeySelection | None:
+    if not cfg.cyber_policy_rotate:
+        return None
     next_selection = upstream_key_pool(cfg).rotate_after_failure(
         selection.key,
         tried_keys,
-        cooldown_seconds=KEY_ROTATION_DELAY_SECONDS,
+        cooldown_seconds=max(0.0, cfg.failed_key_cooldown_seconds),
     )
     if next_selection is not None:
         tried_keys.add(next_selection.key)

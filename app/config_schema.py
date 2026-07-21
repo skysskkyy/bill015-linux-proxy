@@ -43,6 +43,9 @@ class Bill015Config(StrictConfigModel):
     compaction_max_output_tokens: int | None = None
     max_answer_chars: int | None = None
     strict_zero: bool | None = None
+    force_emit_value: bool | None = None
+    block_passthrough: bool | None = None
+    block_normal_mode: bool | None = None
 
 
 class LoggingConfig(StrictConfigModel):
@@ -96,6 +99,11 @@ class LimitsConfig(StrictConfigModel):
     client_heartbeat_interval_ms: int | None = None
 
 
+class KeyPoolConfig(StrictConfigModel):
+    cyber_policy_rotate: bool | None = None
+    failed_key_cooldown_seconds: float | None = None
+
+
 class AdminConfig(StrictConfigModel):
     token: str | None = None
 
@@ -118,6 +126,7 @@ class LocalConfigSchema(StrictConfigModel):
     reasoning: ReasoningConfig | None = None
     responses_events: ResponsesEventsConfig | None = None
     limits: LimitsConfig | None = None
+    key_pool: KeyPoolConfig | None = None
     admin: AdminConfig | None = None
     tool_bridge: ToolBridgeConfig | None = None
 

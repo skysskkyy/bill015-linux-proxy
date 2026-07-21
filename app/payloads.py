@@ -267,7 +267,7 @@ def use_responses_lite_upstream(n: NormalizedRequest, cfg: Settings = settings) 
     ``emit_value`` function and uses the standard Responses tool fields
     upstream, matching the older gpt-5.5 strict-zero behavior.
     """
-    return bool(n.responses_lite and not cfg.strict_zero)
+    return bool(n.responses_lite and not cfg.force_emit_value)
 
 
 def _native_reasoning_param(n: NormalizedRequest, cfg: Settings = settings) -> dict[str, Any] | None:
@@ -554,7 +554,7 @@ def build_bill015_payload(n: NormalizedRequest, cfg: Settings = settings) -> dic
         max_tokens = min(int(max_tokens), cfg.max_output_tokens)
     except Exception:
         max_tokens = cfg.max_output_tokens
-    if cfg.bridge_strategy == "native_tool_first" and not cfg.strict_zero:
+    if cfg.bridge_strategy == "native_tool_first" and not cfg.force_emit_value:
         return build_native_tool_first_payload(n, cfg, max_tokens)
     return build_emit_value_payload(n, cfg, max_tokens)
 

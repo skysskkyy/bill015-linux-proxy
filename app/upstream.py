@@ -10,7 +10,12 @@ from fastapi import HTTPException
 
 from .audit import redact
 from .config import Settings, settings
-from .context_compaction import compact_payload_history, context_threshold_tokens, payload_input_tokens, reinforce_final_action
+from .context_compaction import (
+    compact_payload_history,
+    context_threshold_tokens,
+    payload_input_tokens,
+    reinforce_final_action,
+)
 from .key_pool import ApiKeySelection, upstream_key_pool
 from .local_web_research import local_web_research_preflight
 from .models import Bill015Result, BridgeToolCall, NormalizedRequest, local_response_id
@@ -19,10 +24,12 @@ from .sse import SSEEvent, parse_async_sse_lines
 from .tool_bridge import parse_function_arguments
 from .tool_history import is_repeated_successful_call
 from .upstream_client import http_timeout, upstream_auth_headers
-from .upstream_errors import is_context_length_exceeded, key_rotation_error_reason, sanitize_upstream_error_detail
+from .upstream_errors import (
+    is_context_length_exceeded,
+    key_rotation_error_reason,
+    sanitize_upstream_error_detail,
+)
 from .usage_estimator import usage_estimate_dict
-
-KEY_ROTATION_DELAY_SECONDS = 10 * 60
 
 
 def apply_tool_loop_guard(result: Bill015Result, n: NormalizedRequest) -> None:
@@ -551,10 +558,12 @@ async def _rotate_after_key_error_with_delay(
     reason: str,
     cfg: Settings,
 ) -> ApiKeySelection | None:
+    if not cfg.cyber_policy_rotate:
+        return None
     next_selection = upstream_key_pool(cfg).rotate_after_failure(
         selection.key,
         tried_keys,
-        cooldown_seconds=KEY_ROTATION_DELAY_SECONDS,
+        cooldown_seconds=max(0.0, cfg.failed_key_cooldown_seconds),
     )
     if next_selection is None:
         return None
@@ -725,7 +734,7 @@ async def execute_bill015(n: NormalizedRequest, mode: str, cfg: Settings = setti
             _record_compaction(result, "preemptive_compaction", initial_tokens, after_tokens, removed, clipped, count_retry=False)
     answer_buffer: list[str] = []
     try:
-        max_retries = 0 if cfg.strict_zero else max(0, int(getattr(cfg, "upstream_retries", 0)))
+        max_retries = max(0, int(getattr(cfg, "upstream_retries", 0)))
         transient_attempt = 0
         context_retry_attempt = 0
         empty_stream_attempt = 0

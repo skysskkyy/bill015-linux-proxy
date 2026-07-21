@@ -101,6 +101,11 @@ def _cfg_list(path: str, default: list[str]) -> list[str]:
     return list(default)
 
 
+def _legacy_strict_zero_default() -> bool:
+    """Compatibility fallback for configs created before 0.4.11."""
+    return _env_bool("BILL015_STRICT_ZERO", "bill015.strict_zero", True)
+
+
 @dataclass
 class Settings:
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
@@ -125,6 +130,15 @@ class Settings:
     max_output_tokens: int = field(default_factory=lambda: _env_int("BILL015_MAX_OUTPUT_TOKENS", "bill015.max_output_tokens", 8192))
     compaction_max_output_tokens: int = field(default_factory=lambda: _env_int("BILL015_COMPACTION_MAX_OUTPUT_TOKENS", "bill015.compaction_max_output_tokens", 8192))
     strict_zero: bool = field(default_factory=lambda: _env_bool("BILL015_STRICT_ZERO", "bill015.strict_zero", True))
+    force_emit_value: bool = field(
+        default_factory=lambda: _env_bool("BILL015_FORCE_EMIT_VALUE", "bill015.force_emit_value", _legacy_strict_zero_default())
+    )
+    block_passthrough: bool = field(
+        default_factory=lambda: _env_bool("BILL015_BLOCK_PASSTHROUGH", "bill015.block_passthrough", _legacy_strict_zero_default())
+    )
+    block_normal_mode: bool = field(
+        default_factory=lambda: _env_bool("BILL015_BLOCK_NORMAL_MODE", "bill015.block_normal_mode", _legacy_strict_zero_default())
+    )
     reasoning_effort: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_EFFORT", "reasoning.effort", ""))
     reasoning_summary: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_SUMMARY", "reasoning.summary", ""))
     max_answer_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_ANSWER_CHARS", "bill015.max_answer_chars", 65536))
@@ -132,7 +146,7 @@ class Settings:
     max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 4))
     # 0 means disabled/infinite. Positive values are enforced by upstream.py.
     upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 900.0))
-    upstream_retries: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRIES", "limits.upstream_retries", 0))
+    upstream_retries: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRIES", "limits.upstream_retries", 2))
     upstream_retry_backoff_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRY_BACKOFF_MS", "limits.upstream_retry_backoff_ms", 700))
     context_window_tokens: int = field(default_factory=lambda: _env_int("BILL015_CONTEXT_WINDOW_TOKENS", "limits.context_window_tokens", 128000))
     auto_compact_percent: int = field(default_factory=lambda: _env_int("BILL015_AUTO_COMPACT_PERCENT", "limits.auto_compact_percent", 90))
@@ -144,6 +158,8 @@ class Settings:
     args_done_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_ARGS_DONE_TIMEOUT_MS", "limits.args_done_timeout_ms", 900000))
     upstream_idle_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_IDLE_TIMEOUT_MS", "limits.upstream_idle_timeout_ms", 900000))
     client_heartbeat_interval_ms: int = field(default_factory=lambda: _env_int("BILL015_CLIENT_HEARTBEAT_INTERVAL_MS", "limits.client_heartbeat_interval_ms", 5000))
+    cyber_policy_rotate: bool = field(default_factory=lambda: _env_bool("BILL015_CYBER_POLICY_ROTATE", "key_pool.cyber_policy_rotate", True))
+    failed_key_cooldown_seconds: float = field(default_factory=lambda: _env_float("BILL015_FAILED_KEY_COOLDOWN_SECONDS", "key_pool.failed_key_cooldown_seconds", 600.0))
     evidence_dir: Path = field(default_factory=lambda: Path(_env_str("LOCAL_PROXY_LOG_DIR", "logging.dir", str(PROJECT_ROOT / "proxy_evidence"))))
     store_prompts: bool = field(default_factory=lambda: _env_bool("LOCAL_PROXY_STORE_PROMPTS", "logging.store_prompts", False))
     store_answers: bool = field(default_factory=lambda: _env_bool("LOCAL_PROXY_STORE_ANSWERS", "logging.store_answers", False))
@@ -222,9 +238,9 @@ settings = Settings()
 settings.validate_mode()
 if settings.bridge_strategy not in {"native_tool_first", "emit_value"}:
     settings.bridge_strategy = "emit_value"
-if settings.strict_zero and settings.bridge_strategy == "native_tool_first":
+if settings.force_emit_value and settings.bridge_strategy == "native_tool_first":
     # Native-tool-first exposes real tools upstream and can let the provider
     # account for prompt/output tokens before our local abort boundary.  In
-    # strict-zero mode fail closed back to the proven forced emit_value bridge.
+    # safe bridge mode fails closed back to the proven forced emit_value bridge.
     settings.bridge_strategy = "emit_value"
 settings.config_warnings = CONFIG_WARNINGS
