@@ -54,4 +54,12 @@ def build_upstream_payload(turn: Turn, cfg: Settings = settings, *, packed_items
         payload["reasoning"] = reasoning
     if turn.temperature is not None:
         payload["temperature"] = turn.temperature
+    if turn.client_metadata:
+        payload["client_metadata"] = turn.client_metadata
+    if turn.metadata:
+        payload["metadata"] = turn.metadata
+    if turn.previous_response_id:
+        payload["previous_response_id"] = turn.previous_response_id
+    if turn.prompt_cache_key:
+        payload["prompt_cache_key"] = turn.prompt_cache_key
     return payload

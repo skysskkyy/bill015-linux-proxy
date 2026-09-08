@@ -51,9 +51,9 @@ def build_emit_value_schema(cfg: Settings, catalog: Catalog) -> dict[str, Any]:
         "type": "function",
         "name": cfg.function_name,
         "description": (
-            "Transport wrapper. Call once per local action batch or final answer. "
-            "mode=answer with tool_calls=[] for the user-visible final reply. "
-            "mode=tool_call to request local Codex tools."
+            "Structured Codex turn result. "
+            "mode=answer with tool_calls=[] for the final reply. "
+            "mode=tool_call to request local tools."
         ),
         "strict": False,
         "parameters": {

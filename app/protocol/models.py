@@ -42,6 +42,7 @@ class ToolSpec:
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
     core: bool = False
+    proxy: bool = False
 
 
 @dataclass
@@ -53,12 +54,25 @@ class Catalog:
 
     def get(self, name: str) -> ToolSpec | None:
         key = (name or "").strip()
+        if not key:
+            return None
         if key in self.specs:
             return self.specs[key]
         lower = key.lower()
         for alias, spec in self.specs.items():
-            if alias.lower() == lower or spec.name.lower() == lower:
+            if alias.lower() == lower:
                 return spec
+        matches: list[ToolSpec] = []
+        seen: set[int] = set()
+        for spec in self.specs.values():
+            marker = id(spec)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            if spec.name.lower() == lower:
+                matches.append(spec)
+        if len(matches) == 1:
+            return matches[0]
         return None
 
     @property
@@ -111,6 +125,8 @@ class Turn:
     temperature: float | None = None
     metadata: dict[str, Any] | None = None
     client_metadata: dict[str, Any] | None = None
+    previous_response_id: str | None = None
+    prompt_cache_key: str | None = None
     request_kind: str = "turn"
     is_compaction: bool = False
     responses_lite: bool = False

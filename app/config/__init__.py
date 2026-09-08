@@ -165,6 +165,9 @@ class Settings:
     max_tool_argument_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_TOOL_ARGUMENT_CHARS", "bill015.max_tool_argument_chars", 262144))
     max_total_emit_value_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_TOTAL_EMIT_VALUE_CHARS", "bill015.max_total_emit_value_chars", 393216))
     max_emit_value_calls: int = field(default_factory=lambda: _env_int("BILL015_MAX_EMIT_VALUE_CALLS", "bill015.max_emit_value_calls", 8))
+    progress_continuation_rounds: int = field(
+        default_factory=lambda: _env_int("BILL015_PROGRESS_CONTINUATION_ROUNDS", "bill015.progress_continuation_rounds", 3)
+    )
     emit_value_quiet_ms: int = field(default_factory=lambda: _env_int("BILL015_EMIT_VALUE_QUIET_MS", "bill015.emit_value_quiet_ms", 250))
     max_request_bytes: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_REQUEST_BYTES", "limits.max_request_bytes", 1048576))
     max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 12))
@@ -221,6 +224,14 @@ class Settings:
     multimodal_max_images: int = field(default_factory=lambda: _env_int("BILL015_MULTIMODAL_MAX_IMAGES", "multimodal.max_images", 8))
     multimodal_max_image_bytes: int = field(default_factory=lambda: _env_int("BILL015_MULTIMODAL_MAX_IMAGE_BYTES", "multimodal.max_image_bytes", 10485760))
     responses_chunk_size: int = field(default_factory=lambda: _env_int("BILL015_RESPONSES_CHUNK_SIZE", "responses_events.chunk_size", 256))
+    web_enabled: bool = field(default_factory=lambda: _env_bool("BILL015_WEB_ENABLED", "web.enabled", True))
+    web_backend: str = field(default_factory=lambda: _env_str("BILL015_WEB_BACKEND", "web.backend", "firecrawl"))
+    web_api_url: str = field(default_factory=lambda: _env_str("FIRECRAWL_API_URL", "web.api_url", "http://127.0.0.1:3002").rstrip("/"))
+    web_api_key: str = field(default_factory=lambda: _env_str("FIRECRAWL_API_KEY", "web.api_key", ""))
+    web_search_limit_default: int = field(default_factory=lambda: _env_int("BILL015_WEB_SEARCH_LIMIT", "web.search_limit_default", 5))
+    web_extract_char_limit: int = field(default_factory=lambda: _env_int("BILL015_WEB_EXTRACT_CHAR_LIMIT", "web.extract_char_limit", 15000))
+    web_timeout_seconds: float = field(default_factory=lambda: _env_float("BILL015_WEB_TIMEOUT_SECONDS", "web.timeout_seconds", 60.0))
+    web_max_rounds_per_request: int = field(default_factory=lambda: _env_int("BILL015_WEB_MAX_ROUNDS", "web.max_rounds_per_request", 8))
     config_warnings: list[str] = field(default_factory=list)
 
     @property

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 
 from app.config import settings
@@ -29,6 +31,51 @@ def test_dry_run_responses(monkeypatch):
     assert data["payload"]["tool_choice"]["name"] == "emit_value"
     assert data["payload"]["parallel_tool_calls"] is True
     assert data["payload"]["stream"] is True
+    names = [tool.get("name") for tool in data["payload"].get("tools", [])]
+    blob = json.dumps(data["payload"])
+    assert "web_search" in blob
+    assert "web_extract" in blob
+    assert names == ["emit_value"]
+
+
+def test_upstream_headers_look_like_codex():
+    from app.upstream.client import NATIVE_ORIGINATOR, NATIVE_USER_AGENT, upstream_auth_headers
+
+    headers = upstream_auth_headers(
+        api_key="sk-test",
+        client_headers={
+            "Authorization": "Bearer client-secret",
+            "Cookie": "session=abc",
+            "session-id": "sess_1",
+            "thread-id": "thr_1",
+            "originator": "codex_cli_rs",
+            "User-Agent": "codex_cli_rs/0.153.4 (Linux 6.18.33; x86_64) rust",
+            "x-codex-turn-metadata": "{}",
+            "x-openai-internal-codex-responses-lite": "true",
+        },
+    )
+    assert headers["authorization"] == "Bearer sk-test"
+    assert headers["user-agent"].startswith("codex_cli_rs/")
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["session-id"] == "sess_1"
+    assert headers["thread-id"] == "thr_1"
+    assert "x-codex-turn-metadata" in headers
+    assert "x-openai-internal-codex-responses-lite" not in headers
+    assert "cookie" not in {k.lower() for k in headers if k.lower() == "cookie"} or headers.get("cookie") != "session=abc"
+    fallback = upstream_auth_headers(api_key="sk-test", client_headers={})
+    assert fallback["user-agent"] == NATIVE_USER_AGENT
+    assert fallback["originator"] == NATIVE_ORIGINATOR
+
+
+def test_dry_run_instructions_are_not_relay_fingerprints(monkeypatch):
+    monkeypatch.setattr(settings, "mode", "dry-run")
+    client = TestClient(app)
+    r = client.post("/v1/responses", json={"model": "gpt-6-astra", "input": "Return OK.", "stream": False})
+    assert r.status_code == 200
+    blob = str(r.json()["payload"]).lower()
+    assert "transport wrapper" not in blob
+    assert "bill-015" not in blob
+    assert "secondary distribution" not in blob
 
 
 def test_block_normal_mode(monkeypatch):

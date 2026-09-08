@@ -48,3 +48,25 @@ def test_pack_inserts_loss_notice_when_dropping_history(monkeypatch):
     packed = pack_turn_items(turn)
     assert packed.dropped_items > 0
     assert any(LOSS_PREFIX in str(item) for item in packed.items)
+
+
+def test_pack_does_not_clip_long_tool_output():
+    huge = "parser line " * 8000
+    items = [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "show parser"}]},
+        {"type": "function_call", "name": "shell_command", "call_id": "c1", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": huge},
+    ]
+    turn = Turn(
+        model="gpt-5.5",
+        want_stream=True,
+        client_api="responses",
+        items=items,
+        current_user="show parser",
+        catalog=build_catalog([], items),
+    )
+    packed = pack_turn_items(turn)
+    blob = str(packed.items)
+    assert huge in blob
+    assert "_local_clip_notice" not in blob
+    assert packed.clipped_outputs == 0

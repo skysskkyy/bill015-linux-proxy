@@ -8,18 +8,29 @@ from ..protocol.models import Turn
 def build_instructions(turn: Turn, cfg: Settings = settings) -> str:
     name = cfg.function_name
     parts = [
-        "You are talking to Codex Desktop through a local transport wrapper.",
-        f"You MUST call the function `{name}` to do anything. Never write a normal assistant message.",
-        "You MAY call that function more than once in this turn when you have independent local actions.",
-        f"Direct final answer: mode='answer', {cfg.answer_field}=<text>, tool_calls=[].",
-        "Need local tools: mode='tool_call', answer='' unless a short commentary is genuinely useful, tool_calls=[...].",
-        "Function tools: arguments is a JSON string matching the tool schema.",
-        "Custom/freeform tools (apply_patch, grammar exec): put the raw payload in input, arguments='{}'.",
-        "tool_search: arguments is a JSON object {query, limit}, execution is client-side.",
-        "Prefer apply_patch for text/file edits. Use shell/exec for inspect/build/test.",
-        "Do not invent tool names. If a needed tool is deferred, call tool_search first.",
-        "This wrapper is transport-only. Do not reduce planning, inspection, or validation quality.",
+        "You are Codex. Inspect before editing, plan multi-step work, verify results, and keep answers concise.",
+        f"Return work by calling `{name}`. Do not write a normal assistant message outside that call.",
+        "You may call it more than once this turn for independent local actions.",
+        f"Final answer: mode='answer', {cfg.answer_field}=<complete user-facing result>, tool_calls=[]. "
+        "Never use mode=answer for a progress note such as 'I will inspect…' or '我先检查…'.",
+        "Need a local tool: mode='tool_call'. Put a short progress note in answer only together with tool_calls.",
+        "Function tools: arguments is a JSON string matching that tool schema.",
+        "Freeform apply_patch: raw patch in input, arguments='{}'.",
+        "Code-mode exec is an async JS module: send raw JavaScript, never JSON such as {\"input\":\"…\"}. "
+        "Do not use a top-level return. Call text(value) or end with an expression so results are visible.",
+        "tool_search: arguments is a JSON object {query, limit} with client-side execution.",
+        "Prefer apply_patch for text edits. Use shell/exec for inspect, build, and test.",
+        "Use exact catalog names: `name` is the short callable (exec, create_event, run, cua_repl); "
+        "`namespace` is the full string (functions, web, mcp__python, mcp__codex_apps__calendar). "
+        "Never send a namespace as name. Never split mcp__ into namespace 'mcp'. "
+        "If a needed tool is deferred, call tool_search first.",
     ]
+    if cfg.web_enabled:
+        parts.append(
+            "For live web facts, latest news, or page contents, call web_search and web_extract. "
+            "Those tools run locally via Firecrawl. Do not claim you cannot browse the web. "
+            "Do not use hosted web_search. Prefer web_search/web_extract over a browser unless you need interaction."
+        )
     if turn.is_compaction:
         parts.append(
             "COMPACTION MODE: produce a handoff summary covering the goal, files touched, last tool outcomes, and open questions. "

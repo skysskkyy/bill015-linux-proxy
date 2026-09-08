@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 from fastapi import HTTPException
 
 from ..config import Settings, settings
+from ..protocol.ids import message_item_id, tool_item_id
 from ..protocol.models import BridgeToolCall, Turn, TurnResult, local_response_id
 from ..protocol.sse import encode_sse, split_text
 from ..upstream.errors import error_message_from_detail
@@ -97,7 +98,7 @@ def make_response_object(rid: str, turn: Turn, status: str, *, output: list[dict
 
 
 def compact_output(result: TurnResult) -> dict[str, Any]:
-    item_id = "msg_" + result.local_request_id.removeprefix("resp_local_")[:18] + "_compact"
+    item_id = message_item_id(result.local_request_id, 0)
     return {
         "output": [
             {
@@ -115,11 +116,11 @@ def response_json(result: TurnResult, turn: Turn) -> dict[str, Any]:
     output: list[dict[str, Any]] = []
     text = result.commentary or result.answer
     if text and result.tool_calls:
-        output.append(_message_item(f"{rid}_msg", result.commentary or result.answer, "completed", phase="commentary"))
+        output.append(_message_item(message_item_id(rid, 0), result.commentary or result.answer, "completed", phase="commentary"))
     for call in result.tool_calls:
-        output.append(_tool_item(call, f"{rid}_{call.id}", "completed"))
+        output.append(_tool_item(call, tool_item_id(call), "completed"))
     if not result.tool_calls:
-        output.append(_message_item(f"{rid}_msg", result.answer, "completed"))
+        output.append(_message_item(message_item_id(rid, 0), result.answer, "completed"))
     return make_response_object(rid, turn, "completed", output=output)
 
 
@@ -166,7 +167,7 @@ class ReplayStream:
         return self.event("response.in_progress", response=make_response_object(self.rid, self.turn, "in_progress"))
 
     def message(self, text: str, output_index: int, *, phase: str | None = None) -> list[bytes]:
-        item_id = f"{self.rid}_msg_{output_index}"
+        item_id = message_item_id(self.rid, output_index)
         events = [self.event("response.output_item.added", output_index=output_index, item=_message_item(item_id, "", "in_progress", phase=phase))]
         for chunk in split_text(text, self.cfg.responses_chunk_size):
             events.append(self.event("response.output_text.delta", item_id=item_id, output_index=output_index, content_index=0, delta=chunk, logprobs=[]))
@@ -181,7 +182,7 @@ class ReplayStream:
         return events
 
     def tool(self, call: BridgeToolCall, output_index: int) -> list[bytes]:
-        item_id = f"{self.rid}_{call.id}"
+        item_id = tool_item_id(call)
         events = [self.event("response.output_item.added", output_index=output_index, item=_tool_item(call, item_id, "in_progress"))]
         if call.call_type == "custom":
             payload = call.input or call.arguments

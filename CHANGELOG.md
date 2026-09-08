@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1] - 2026-09-09
+
+### Fixed
+- Replay Codex tool identity as short `name` plus full `namespace`; do not split `mcp__cua_repl` into `mcp` + `cua_repl`.
+- Unpack `type=namespace` catalog containers, including Lite `additional_tools`.
+- Normalize code-mode `exec` input: unwrap JSON/`input` wrappers, make top-level `return` legal, and surface the last expression via `text(...)`.
+- Treat progress notes such as “我先检查…” as commentary and continue the turn instead of ending with `mode=answer`.
+- Stop clipping long tool outputs, so `_local_clip_notice` is no longer sent upstream (that field caused Responses `unknown_parameter` 400s).
+- Replay item IDs with Codex prefixes (`msg`/`fc`/`ctc`/`tsc`).
+
+### Added
+- Local Firecrawl `web_search` / `web_extract` tools for live web facts.
+
 ## [0.5.0] - 2026-09-08
 
 ### Changed

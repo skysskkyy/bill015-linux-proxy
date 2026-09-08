@@ -10,19 +10,53 @@ from fastapi import HTTPException
 
 from ..bridge.parse import parse_emit_value
 from ..bridge.payload import build_upstream_payload
+from ..bridge.progress import should_continue_progress
 from ..config import Settings, settings
 from ..context.pack import pack_turn_items
 from ..ingest.web_intent import local_web_preflight
 from ..ops.audit import redact
-from ..protocol.models import BridgeToolCall, Turn, TurnResult, WrapperCall, local_response_id
+from ..protocol.models import BridgeToolCall, Turn, TurnResult, WrapperCall, local_response_id, new_call_id
 from ..protocol.sse import SSEEvent, parse_async_sse_lines
-from .client import http_timeout, upstream_auth_headers
+from ..tools.loop import apply_proxy_tools, split_proxy_calls
+from .client import NATIVE_USER_AGENT, http_timeout, upstream_auth_headers
 from .errors import (
     is_context_length_exceeded,
     key_rotation_error_reason,
     sanitize_upstream_error_detail,
 )
 from .keys import upstream_key_pool
+
+
+def _progress_nudge(note: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "role": "developer",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "[LOCAL TURN CONTINUATION] Previous emit_value was a progress note, not a final answer:\n"
+                    f"{note}\n"
+                    "Use mode=tool_call with local tools now. mode=answer only after the user request is fully handled."
+                ),
+            }
+        ],
+    }
+
+
+def _progress_fallback_call(turn: Turn) -> BridgeToolCall | None:
+    spec = turn.catalog.get("tool_search")
+    if spec is None or spec.call_type != "tool_search":
+        return None
+    query = (turn.current_user or "continue the current task").strip()[:200] or "continue the current task"
+    return BridgeToolCall(
+        id=new_call_id(),
+        name="tool_search",
+        arguments="",
+        call_type="tool_search",
+        execution="client",
+        search_arguments={"query": query, "limit": 12},
+    )
 
 
 def merge_wrappers(wrappers: list[WrapperCall]) -> tuple[str, str, list[BridgeToolCall], bool]:
@@ -36,12 +70,17 @@ def merge_wrappers(wrappers: list[WrapperCall]) -> tuple[str, str, list[BridgeTo
             tools.extend(wrapper.tool_calls)
             if wrapper.answer.strip():
                 commentary.append(wrapper.answer.strip())
+        elif wrapper.mode == "progress":
+            if wrapper.answer.strip():
+                commentary.append(wrapper.answer.strip())
         else:
             if wrapper.answer.strip():
                 answers.append(wrapper.answer.strip())
     if tools:
         return "\n\n".join(answers), "\n\n".join(commentary), tools, malformed
-    return "\n\n".join(answers or commentary), "\n\n".join(commentary), [], malformed
+    if answers:
+        return "\n\n".join(answers), "\n\n".join(commentary), [], malformed
+    return "", "\n\n".join(commentary), [], malformed
 
 
 def collect_from_events(events: Iterable[SSEEvent], turn: Turn, cfg: Settings = settings) -> TurnResult:
@@ -119,7 +158,10 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
     result = TurnResult(local_request_id=request_id)
     _ = mode
     start = time.perf_counter()
-    preflight = local_web_preflight(turn.current_user, turn.catalog, turn.items) if cfg.tool_bridge_local_web_research_preflight else None
+    has_proxy_web = any(spec.proxy for spec in turn.catalog.specs.values())
+    preflight = None
+    if cfg.tool_bridge_local_web_research_preflight and not has_proxy_web:
+        preflight = local_web_research_preflight(turn.current_user, turn.catalog, turn.items)
     if preflight and not turn.is_compaction:
         result.tool_calls = [preflight]
         result.commentary = ""
@@ -144,8 +186,11 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
     transient = 0
     context_attempt = 0
     policy_rotations = 0
+    proxy_rounds = 0
+    progress_rounds = 0
+    progress_notes: list[str] = []
     try:
-        async with httpx.AsyncClient(timeout=http_timeout(cfg)) as client:
+        async with httpx.AsyncClient(timeout=http_timeout(cfg), headers={"User-Agent": NATIVE_USER_AGENT}) as client:
             while True:
                 headers = upstream_auth_headers(api_key=selection.key, cfg=cfg, client_headers=turn.request_headers)
                 buffers: dict[str, list[str]] = {}
@@ -262,6 +307,45 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                         _apply_wrappers(result, wrappers)
                         if result.args_done_seen:
                             result.aborted = True
+                            proxy_calls, client_calls = split_proxy_calls(result.tool_calls)
+                            if proxy_calls and proxy_rounds < cfg.web_max_rounds_per_request:
+                                await apply_proxy_tools(turn, proxy_calls, cfg)
+                                proxy_rounds += 1
+                                result.retry_reasons.append(f"proxy_web:{','.join(c.name for c in proxy_calls)}")
+                                pack = pack_turn_items(turn, cfg)
+                                payload = build_upstream_payload(turn, cfg, packed_items=pack.items)
+                                result.tool_calls = []
+                                result.answer = ""
+                                result.commentary = ""
+                                result.args_done_seen = False
+                                wrappers = []
+                                continue
+                            result.tool_calls = client_calls
+                            if should_continue_progress(result) and progress_rounds < cfg.progress_continuation_rounds:
+                                note = (result.commentary or "").strip()
+                                if note:
+                                    progress_notes.append(note)
+                                    turn.items.append(_progress_nudge(note))
+                                progress_rounds += 1
+                                result.retry_reasons.append("progress_commentary")
+                                pack = pack_turn_items(turn, cfg)
+                                payload = build_upstream_payload(turn, cfg, packed_items=pack.items)
+                                result.packed_item_count = len(pack.items)
+                                result.tool_calls = []
+                                result.answer = ""
+                                result.commentary = ""
+                                result.args_done_seen = False
+                                wrappers = []
+                                continue
+                            if progress_notes:
+                                extra = (result.commentary or "").strip()
+                                result.commentary = "\n\n".join([item for item in [*progress_notes, extra] if item])
+                            if should_continue_progress(result):
+                                fallback = _progress_fallback_call(turn)
+                                if fallback is not None:
+                                    result.tool_calls = [fallback]
+                                    result.answer = ""
+                                    result.retry_reasons.append("progress_fallback_tool")
                             break
                         if result.retry_reasons[-1:] == ["args_done_timeout"] and result.retry_count < cfg.stream_recovery_retries:
                             result.retry_count += 1

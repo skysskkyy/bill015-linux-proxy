@@ -5,6 +5,7 @@ from typing import Any
 
 from ..config import Settings, settings
 from ..ingest.text import item_text, item_type
+from ..protocol.ids import coerce_item_id
 from ..protocol.models import TOOL_CALL_TYPES, TOOL_OUTPUT_TYPES, Turn
 from .tokens import count_text_tokens, item_tokens, items_tokens, pack_budget, threshold_tokens
 
@@ -43,23 +44,6 @@ def _head_tail(text: str, max_chars: int) -> str:
         return text
     keep = max(64, max_chars // 2)
     return text[:keep] + "\n…\n" + text[-keep:]
-
-
-def _clip_output_item(item: dict[str, Any], max_chars: int) -> tuple[dict[str, Any], bool]:
-    cloned = dict(item)
-    text = item_text(item)
-    if len(text) <= max_chars:
-        return cloned, False
-    clipped = _head_tail(text, max_chars)
-    notice = f"{LOSS_PREFIX} clipped tool output {len(text)} → {len(clipped)} chars."
-    if "output" in cloned:
-        cloned["output"] = clipped
-    elif "content" in cloned:
-        cloned["content"] = [{"type": "output_text", "text": clipped}]
-    else:
-        cloned["text"] = clipped
-    cloned["_local_clip_notice"] = notice
-    return cloned, True
 
 
 def _loss_item(message: str) -> dict[str, Any]:
@@ -101,7 +85,6 @@ def pack_turn_items(turn: Turn, cfg: Settings = settings, *, aggressive: bool = 
     reasoning = _reasoning_items(items)
     pinned: list[dict[str, Any]] = []
     notices: list[str] = []
-    clipped = 0
 
     if user_index is not None:
         user_item = dict(items[user_index])
@@ -110,22 +93,14 @@ def pack_turn_items(turn: Turn, cfg: Settings = settings, *, aggressive: bool = 
             clipped_text = _head_tail(text, max(2000, max_output_chars * 2))
             notices.append(f"{LOSS_PREFIX} clipped current user request {len(text)} → {len(clipped_text)} chars.")
             user_item["content"] = [{"type": "input_text", "text": clipped_text}]
-        pinned.append(user_item)
+        pinned.append(coerce_item_id(user_item))
 
     if batch_span is not None:
         for index in range(batch_span[0], batch_span[1]):
-            item = items[index]
-            if item_type(item) in TOOL_OUTPUT_TYPES:
-                clipped_item, did = _clip_output_item(item, max_output_chars)
-                pinned.append(clipped_item)
-                if did:
-                    clipped += 1
-                    notices.append(str(clipped_item.get("_local_clip_notice") or ""))
-            else:
-                pinned.append(dict(item))
+            pinned.append(coerce_item_id(dict(items[index])))
 
     for item in reasoning:
-        pinned.append(dict(item))
+        pinned.append(coerce_item_id(dict(item)))
 
     used = items_tokens(pinned)
     history: list[dict[str, Any]] = []
@@ -136,11 +111,7 @@ def pack_turn_items(turn: Turn, cfg: Settings = settings, *, aggressive: bool = 
         item = items[index]
         if item_type(item) == "reasoning":
             continue
-        candidate = dict(item)
-        if item_type(item) in TOOL_OUTPUT_TYPES:
-            candidate, did = _clip_output_item(candidate, max_output_chars)
-            if did:
-                clipped += 1
+        candidate = coerce_item_id(dict(item))
         cost = item_tokens(candidate)
         if used + cost > budget:
             dropped += 1
@@ -155,12 +126,13 @@ def pack_turn_items(turn: Turn, cfg: Settings = settings, *, aggressive: bool = 
     if notices or dropped:
         notice = (
             f"{LOSS_PREFIX} kept current user + latest tool batch; "
-            f"dropped {dropped} older items; clipped {clipped} tool outputs. "
+            f"dropped {dropped} older items. "
             "Re-read files before exact claims."
         )
         notices = [n for n in notices if n] + [notice]
         packed.insert(0, _loss_item(notice))
         used = items_tokens(packed)
 
+    packed = [coerce_item_id(item) if isinstance(item, dict) else item for item in packed]
     turn.loss_notices = notices
-    return PackResult(items=packed, notices=notices, clipped_outputs=clipped, dropped_items=dropped, tokens=used)
+    return PackResult(items=packed, notices=notices, clipped_outputs=0, dropped_items=dropped, tokens=used)

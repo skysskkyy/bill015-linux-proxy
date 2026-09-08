@@ -44,6 +44,7 @@ class Bill015Config(StrictConfigModel):
     max_tool_argument_chars: int | None = None
     max_total_emit_value_chars: int | None = None
     max_emit_value_calls: int | None = None
+    progress_continuation_rounds: int | None = None
     emit_value_quiet_ms: int | None = None
     strict_zero: bool | None = None
     malformed_retries: int | None = None
@@ -109,6 +110,17 @@ class ToolBridgeConfig(StrictConfigModel):
     catalog_max_chars: int | None = None
 
 
+class WebConfig(StrictConfigModel):
+    enabled: bool | None = None
+    backend: str | None = None
+    api_url: str | None = None
+    api_key: str | None = None
+    search_limit_default: int | None = None
+    extract_char_limit: int | None = None
+    timeout_seconds: float | None = None
+    max_rounds_per_request: int | None = None
+
+
 class MultimodalConfig(StrictConfigModel):
     strategy: Literal["reject", "local_extract", "native_passthrough"] | None = None
     max_images: int | None = None
@@ -129,6 +141,7 @@ class LocalConfigSchema(StrictConfigModel):
     admin: AdminConfig | None = None
     tool_bridge: ToolBridgeConfig | None = None
     multimodal: MultimodalConfig | None = None
+    web: WebConfig | None = None
     responses_events: dict[str, Any] | None = None
 
 

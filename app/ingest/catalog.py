@@ -5,9 +5,13 @@ from typing import Any
 
 from ..config import Settings, settings
 from ..protocol.models import TOOL_OUTPUT_TYPES, Catalog, ToolSpec
+from ..protocol.names import catalog_aliases, is_namespace_only, mcp_join, split_tool_identity
 
 CORE_NAMES = {
     "exec",
+    "wait",
+    "exec_command",
+    "write_stdin",
     "shell",
     "shell_command",
     "apply_patch",
@@ -20,7 +24,13 @@ CORE_NAMES = {
     "update_plan",
     "grep_files",
     "view_image",
+    "web_search",
+    "web_extract",
 }
+
+HOSTED_TOOL_TYPES = {"web_search", "computer", "computer_use"}
+NAME_KEYS = ("name", "tool_name", "callable_name", "id")
+NAMESPACE_KEYS = ("namespace", "tool_namespace", "callable_namespace")
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -29,24 +39,58 @@ def _as_list(value: Any) -> list[Any]:
     return []
 
 
-def _tool_name(tool: dict[str, Any], idx: int) -> str:
-    for key in ("name", "tool_name", "id"):
+def _first_str(tool: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
         raw = tool.get(key)
         if isinstance(raw, str) and raw.strip():
             return raw.strip()
-    namespace = str(tool.get("namespace") or "").strip()
-    name = str(tool.get("name") or "").strip()
-    if namespace and name:
-        return f"{namespace}__{name}"
+    return None
+
+
+def _tool_name(tool: dict[str, Any], idx: int) -> str:
+    name = _first_str(tool, NAME_KEYS)
+    if name:
+        return name
     typ = str(tool.get("type") or "tool")
     return f"{typ}_{idx}"
 
 
-def _call_type(tool: dict[str, Any], name: str) -> tuple[str, str]:
+def _tool_namespace(tool: dict[str, Any]) -> str | None:
+    return _first_str(tool, NAMESPACE_KEYS)
+
+
+def iter_callable_tools(tools: Any) -> list[dict[str, Any]]:
+    """Unpack `type=namespace` containers; skip hosted tools and namespace-only rows."""
+    found: list[dict[str, Any]] = []
+    for tool in _as_list(tools):
+        if not isinstance(tool, dict):
+            continue
+        typ = str(tool.get("type") or tool.get("raw_type") or "").strip().lower()
+        nested = tool.get("tools")
+        if typ == "namespace" or (typ == "" and isinstance(nested, list) and _first_str(tool, NAME_KEYS)):
+            ns = _tool_namespace(tool) or _first_str(tool, NAME_KEYS)
+            for child in _as_list(nested):
+                if not isinstance(child, dict):
+                    continue
+                cloned = dict(child)
+                if ns and not _tool_namespace(cloned):
+                    cloned["namespace"] = ns
+                found.extend(iter_callable_tools([cloned]))
+            continue
+        if typ in HOSTED_TOOL_TYPES:
+            continue
+        found.append(tool)
+    return found
+
+
+def _call_type(tool: dict[str, Any], name: str, namespace: str | None = None) -> tuple[str, str]:
     raw = str(tool.get("type") or tool.get("raw_type") or "function").strip().lower()
+    ns = namespace or _tool_namespace(tool) or ""
+    if name == "exec" and not str(ns).startswith("mcp__"):
+        return "custom", raw or "custom"
     if raw in {"custom", "freeform"} or name in {"apply_patch"} or tool.get("format"):
         return "custom", raw or "custom"
-    if raw in {"tool_search", "web_search"} or name == "tool_search":
+    if raw == "tool_search" or name == "tool_search":
         return "tool_search", raw or "tool_search"
     return "function", raw or "function"
 
@@ -59,13 +103,15 @@ def _is_core(name: str, namespace: str | None, description: str) -> bool:
 def spec_from_tool(tool: dict[str, Any], idx: int) -> ToolSpec | None:
     if not isinstance(tool, dict):
         return None
-    name = _tool_name(tool, idx)
-    namespace = tool.get("namespace")
-    namespace_s = str(namespace).strip() if isinstance(namespace, str) and namespace.strip() else None
-    call_type, raw_type = _call_type(tool, name)
+    raw_name = _tool_name(tool, idx)
+    namespace_s = _tool_namespace(tool)
+    name, namespace_s = split_tool_identity(raw_name, namespace_s)
+    if is_namespace_only(name, namespace_s) or not name:
+        return None
+    call_type, raw_type = _call_type(tool, name, namespace_s)
     description = str(tool.get("description") or "")
     parameters = tool.get("parameters") if isinstance(tool.get("parameters"), dict) else {}
-    alias = name if not namespace_s else f"{namespace_s}__{name}"
+    alias = name if not namespace_s else mcp_join(name, namespace_s)
     return ToolSpec(
         alias=alias,
         name=name,
@@ -79,11 +125,12 @@ def spec_from_tool(tool: dict[str, Any], idx: int) -> ToolSpec | None:
 
 
 def _collect_from_tools_array(tools: Any, specs: dict[str, ToolSpec]) -> None:
-    for idx, tool in enumerate(_as_list(tools)):
+    for idx, tool in enumerate(iter_callable_tools(tools)):
         spec = spec_from_tool(tool, idx)
-        if spec:
-            specs.setdefault(spec.alias, spec)
-            specs.setdefault(spec.name, spec)
+        if not spec:
+            continue
+        for alias in catalog_aliases(spec.name, spec.namespace):
+            specs.setdefault(alias, spec)
 
 
 def collect_additional_tools(items: Any) -> list[dict[str, Any]]:
@@ -159,7 +206,12 @@ def build_catalog(
                 selected.remove(spec.alias)
             if spec.alias in deferred:
                 deferred.remove(spec.alias)
-    return Catalog(specs=unique, selected=selected, deferred=deferred, dropped=dropped)
+    catalog = Catalog(specs=unique, selected=selected, deferred=deferred, dropped=dropped)
+    if cfg.web_enabled:
+        from ..tools.web import inject_proxy_web_tools
+
+        catalog = inject_proxy_web_tools(catalog, cfg)
+    return catalog
 
 
 def catalog_json(catalog: Catalog, cfg: Settings = settings) -> str:

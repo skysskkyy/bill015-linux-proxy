@@ -5,6 +5,9 @@ from typing import Any
 
 from ..config import Settings, settings
 from ..protocol.models import BridgeToolCall, Catalog, WrapperCall, new_call_id
+from ..protocol.names import is_namespace_only, recover_tool_name, resolve_catalog_tool, split_tool_identity
+from .exec_source import is_code_mode_exec, normalize_exec_source, unwrap_exec_source
+from .progress import looks_like_progress
 
 
 def _load_object(raw: str) -> tuple[dict[str, Any], bool]:
@@ -39,32 +42,61 @@ def _as_args_string(value: Any) -> str:
 
 
 def _resolve(name: str, namespace: str, catalog: Catalog, cfg: Settings) -> tuple[str, str | None, str] | None:
-    raw = (name or "").strip()
-    ns = (namespace or "").strip() or None
-    if ns and raw:
-        spec = catalog.get(f"{ns}__{raw}") or catalog.get(raw)
-    else:
-        spec = catalog.get(raw)
-    if spec is None:
-        if cfg.tool_bridge_allow_unknown_tools and raw:
-            return raw, ns, "function"
+    spec = resolve_catalog_tool(catalog, name, namespace or None)
+    if spec is not None:
+        if is_namespace_only(spec.name, spec.namespace) or not spec.name:
+            return None
+        return spec.name, spec.namespace, spec.call_type
+    raw, ns = split_tool_identity(name, namespace)
+    if not raw:
         return None
-    return spec.name, spec.namespace or ns, spec.call_type
+    if is_namespace_only(raw, ns):
+        if not cfg.tool_bridge_allow_unknown_tools:
+            return None
+        if raw.lower() in {"functions", "mcp", "web"}:
+            return None
+        if ns and raw.lower() == ns.lower():
+            ns = None
+        return raw, ns, "function"
+    if cfg.tool_bridge_allow_unknown_tools:
+        return raw, ns, "function"
+    return None
 
 
 def _one_call(obj: dict[str, Any], catalog: Catalog, cfg: Settings) -> BridgeToolCall | None:
-    name = str(obj.get("name") or obj.get("tool") or "")
-    namespace = str(obj.get("namespace") or "")
-    resolved = _resolve(name, namespace, catalog, cfg)
+    name, namespace = recover_tool_name(obj)
+    if not name and namespace:
+        name, namespace = namespace, None
+    resolved = _resolve(name, namespace or "", catalog, cfg)
     if resolved is None:
         return None
     tool_name, ns, call_type = resolved
     arguments = obj.get("arguments")
     raw_input = obj.get("input")
+    if is_code_mode_exec(tool_name, ns):
+        call_type = "custom"
+        if isinstance(raw_input, str) and raw_input.strip():
+            src = raw_input
+        elif isinstance(arguments, dict):
+            src = next((str(arguments[k]) for k in ("input", "code", "source", "script") if isinstance(arguments.get(k), str) and arguments.get(k).strip()), _as_args_string(arguments))
+        elif isinstance(arguments, str):
+            src = arguments
+        else:
+            src = _as_args_string(arguments)
+        input_text = normalize_exec_source(src)
+        return BridgeToolCall(
+            id=new_call_id(),
+            name=tool_name,
+            arguments=input_text,
+            call_type="custom",
+            namespace=ns,
+            input=input_text,
+        )
     if call_type == "custom":
         input_text = raw_input if isinstance(raw_input, str) and raw_input else _as_args_string(arguments)
         if not input_text and isinstance(arguments, str) and arguments not in {"", "{}"}:
             input_text = arguments
+        input_text = unwrap_exec_source(input_text) if input_text.startswith("{") and '"input"' in input_text else input_text
         return BridgeToolCall(
             id=new_call_id(),
             name=tool_name,
@@ -114,7 +146,11 @@ def parse_emit_value(raw: str, catalog: Catalog, cfg: Settings = settings) -> Wr
             parsed = _one_call(item, catalog, cfg)
             if parsed is not None:
                 calls.append(parsed)
-    if mode not in {"answer", "tool_call"}:
+    if calls:
+        mode = "tool_call"
+    elif mode == "answer" and looks_like_progress(answer_text):
+        mode = "progress"
+    elif mode not in {"answer", "tool_call", "progress"}:
         mode = "tool_call" if calls else "answer"
     if mode == "answer":
         calls = []
