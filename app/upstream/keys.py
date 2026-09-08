@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Iterable
 
-from .config import Settings, settings
+from ..config import Settings, settings
 
 
 @dataclass(frozen=True)
@@ -18,8 +18,6 @@ class ApiKeySelection:
 
 
 class ApiKeyPool:
-    """Process-wide, concurrency-safe ordered API key pool."""
-
     def __init__(self, keys: Iterable[str]):
         self._keys = tuple(dict.fromkeys(str(key).strip() for key in keys if str(key).strip()))
         self._index = 0
@@ -55,7 +53,6 @@ class ApiKeyPool:
         *,
         cooldown_seconds: float = 0,
     ) -> ApiKeySelection | None:
-        """Quarantine a failed key and immediately select another usable key."""
         tried = set(tried_keys or ())
         with self._lock:
             now = time.monotonic()

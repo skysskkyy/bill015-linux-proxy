@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 import uuid
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict
+from typing import Any
 
-from .config import settings
+from ..config import settings
 
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
     re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.I),
     re.compile(r"(?i)(cookie\s*[:=]\s*)[^\s,;]{12,}"),
 ]
-
 SECRET_KEY_NAMES = {
     "authorization",
     "cookie",
@@ -65,6 +63,7 @@ class AuditLogger:
         self.rotate_bytes = max(1, rotate_mb) * 1024 * 1024
         self._lock = Lock()
         self.directory.mkdir(parents=True, exist_ok=True)
+        self._recent: list[dict[str, Any]] = []
 
     def _rotate_if_needed(self) -> None:
         if not self.path.exists() or self.path.stat().st_size < self.rotate_bytes:
@@ -73,37 +72,20 @@ class AuditLogger:
         rotated = self.directory / f"audit_{stamp}_{time.time_ns()}_{uuid.uuid4().hex[:8]}.jsonl"
         self.path.rename(rotated)
 
-    def write(self, record: Dict[str, Any]) -> None:
+    def write(self, record: dict[str, Any]) -> None:
         safe = redact(record)
         safe.setdefault("ts", int(time.time()))
         line = json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
         with self._lock:
             self._rotate_if_needed()
-            with self.path.open("a", encoding="utf-8") as f:
-                f.write(line + os.linesep)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            self._recent.append(safe)
+            self._recent = self._recent[-200:]
 
-    def recent(self, n: int = 20) -> list[Dict[str, Any]]:
-        limit = max(1, min(n, 200))
+    def recent(self, n: int = 20) -> list[dict[str, Any]]:
         with self._lock:
-            files = sorted(self.directory.glob("audit_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if self.path.exists():
-                files.insert(0, self.path)
-            records: list[Dict[str, Any]] = []
-            for path in files:
-                try:
-                    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-                except OSError:
-                    continue
-                for line in reversed(lines):
-                    if not line.strip():
-                        continue
-                    try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-                    if len(records) >= limit:
-                        return list(reversed(records))
-            return list(reversed(records))
+            return list(self._recent[-max(1, n) :])
 
 
 audit_logger = AuditLogger(settings.evidence_dir, settings.rotate_mb)

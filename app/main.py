@@ -10,17 +10,15 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .audit import audit_logger
-from .capacity import CapacityLimiter, QueueFullError, QueueWaitTimeoutError
-from .chat_events import chat_json, chat_sse_generator
 from .config import settings
-from .key_pool import upstream_key_pool
-from .models import Bill015Result, NormalizedRequest, local_response_id
-from .normalization import normalize_chat_request, normalize_responses_request, request_needs_passthrough, sanitize_unsupported_image_inputs
-from .response_events import response_json, responses_sse_generator
-from .state import runtime_state
-from .upstream import audit_from_result, dry_run_response, execute_bill015
-from .upstream_client import codex_request_headers, normal_forward_json, normal_forward_stream
+from .ingest import normalize_chat_request, normalize_responses_request, request_needs_passthrough
+from .ops.audit import audit_logger
+from .ops.capacity import CapacityLimiter, QueueFullError, QueueWaitTimeoutError
+from .ops.state import runtime_state
+from .protocol.models import Turn, TurnResult, local_response_id
+from .replay import chat_json, chat_sse_generator, compact_output, response_json, responses_sse_generator
+from .upstream import audit_from_result, dry_run_response, execute_turn, upstream_key_pool
+from .upstream.client import codex_request_headers
 
 
 def project_version() -> str:
@@ -31,8 +29,7 @@ def project_version() -> str:
 
 
 PROJECT_VERSION = project_version()
-
-app = FastAPI(title="BILL-015 Local Codex Proxy", version=PROJECT_VERSION)
+app = FastAPI(title="BILL-015 Linux Codex Desktop Proxy", version=PROJECT_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins,
@@ -61,7 +58,6 @@ async def read_json_body(request: Request) -> dict[str, Any]:
                 raise HTTPException(status_code=413, detail="request body too large")
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid Content-Length header") from None
-
     body = bytearray()
     async for chunk in request.stream():
         if not chunk:
@@ -80,15 +76,18 @@ async def read_json_body(request: Request) -> dict[str, Any]:
     return obj
 
 
+async def _const(value: Any) -> Any:
+    return value
+
+
 def require_admin(authorization: str | None) -> None:
     if not settings.admin_token:
         raise HTTPException(status_code=403, detail="LOCAL_PROXY_ADMIN_TOKEN is not configured")
-    expected = "Bearer " + settings.admin_token
-    if authorization != expected:
+    if authorization != "Bearer " + settings.admin_token:
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
-async def run_and_record(n: NormalizedRequest, mode: str, local_request_id: str | None = None) -> Bill015Result:
+async def run_and_record(turn: Turn, mode: str, local_request_id: str | None = None) -> TurnResult:
     runtime_state.inc_request()
     start = time.perf_counter()
     request_id = local_request_id or local_response_id()
@@ -96,105 +95,47 @@ async def run_and_record(n: NormalizedRequest, mode: str, local_request_id: str 
         lease = await capacity_limiter.acquire()
     except QueueFullError as e:
         runtime_state.mark_error("proxy queue is full")
-        audit_logger.write({
-            "local_request_id": request_id,
-            "mode": mode,
-            "client_api": n.client_api,
-            "model": n.model,
-            "duration_ms": int((time.perf_counter() - start) * 1000),
-            "error": "proxy queue is full",
-            "error_type": "QueueFullError",
-            "prompt_chars": len(n.user_input),
-        })
         raise HTTPException(status_code=429, detail="proxy queue is full; retry later") from e
     except QueueWaitTimeoutError as e:
         runtime_state.mark_error("proxy queue wait timed out")
-        audit_logger.write({
-            "local_request_id": request_id,
-            "mode": mode,
-            "client_api": n.client_api,
-            "model": n.model,
-            "duration_ms": int((time.perf_counter() - start) * 1000),
-            "error": "proxy queue wait timed out",
-            "error_type": "QueueWaitTimeoutError",
-            "prompt_chars": len(n.user_input),
-        })
         raise HTTPException(status_code=503, detail="proxy stayed busy longer than queue_wait_timeout_ms; retry later") from e
-
     try:
         try:
             async with asyncio.timeout(max(0.001, settings.request_total_timeout_ms / 1000)):
-                result = await execute_bill015(n, mode, local_request_id=request_id)
+                result = await execute_turn(turn, mode, local_request_id=request_id)
             runtime_state.mark_success(args_done=result.args_done_seen, aborted=result.aborted)
-            record = audit_from_result(result, n, mode)
+            record = audit_from_result(result, turn, mode)
             record["queue_wait_ms"] = lease.queue_wait_ms
             audit_logger.write(record)
             return result
         except TimeoutError as e:
             runtime_state.mark_request_timeout()
             runtime_state.mark_error("proxy request exceeded request_total_timeout_ms")
-            audit_logger.write({
-                "local_request_id": request_id,
-                "mode": mode,
-                "client_api": n.client_api,
-                "model": n.model,
-                "duration_ms": int((time.perf_counter() - start) * 1000),
-                "queue_wait_ms": lease.queue_wait_ms,
-                "error": "proxy request exceeded request_total_timeout_ms",
-                "error_type": "RequestTotalTimeout",
-                "prompt_chars": len(n.user_input),
-            })
+            audit_logger.write(
+                {
+                    "local_request_id": request_id,
+                    "mode": mode,
+                    "error": "proxy request exceeded request_total_timeout_ms",
+                    "queue_wait_ms": lease.queue_wait_ms,
+                    "duration_ms": int((time.perf_counter() - start) * 1000),
+                }
+            )
             raise HTTPException(status_code=504, detail="proxy request exceeded request_total_timeout_ms") from e
         except HTTPException as e:
             runtime_state.mark_error(str(e.detail))
-            failed_result = getattr(e, "bill015_result", None)
-            if isinstance(failed_result, Bill015Result):
-                record = audit_from_result(failed_result, n, mode)
-                record["error"] = e.detail
-                record["error_type"] = "HTTPException"
-            else:
-                record = {
-                    "local_request_id": request_id,
-                    "mode": mode,
-                    "client_api": n.client_api,
-                    "model": n.model,
-                    "duration_ms": int((time.perf_counter() - start) * 1000),
-                    "error": e.detail,
-                    "error_type": "HTTPException",
-                    "prompt_chars": len(n.user_input),
-                }
-            record["queue_wait_ms"] = lease.queue_wait_ms
-            audit_logger.write(record)
+            audit_logger.write({"local_request_id": request_id, "mode": mode, "error": e.detail, "queue_wait_ms": lease.queue_wait_ms})
             raise
         except Exception as e:
             runtime_state.mark_error(f"{type(e).__name__}: {e}")
-            audit_logger.write({
-                "local_request_id": request_id,
-                "mode": mode,
-                "client_api": n.client_api,
-                "model": n.model,
-                "duration_ms": int((time.perf_counter() - start) * 1000),
-                "error": f"{type(e).__name__}: {e}",
-                "error_type": type(e).__name__,
-                "queue_wait_ms": lease.queue_wait_ms,
-                "prompt_chars": len(n.user_input),
-            })
+            audit_logger.write({"local_request_id": request_id, "mode": mode, "error": f"{type(e).__name__}: {e}"})
             raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}") from e
     finally:
         await lease.release()
 
 
-async def synthetic_result(answer: str, n: NormalizedRequest) -> Bill015Result:
-    result = Bill015Result(local_request_id=local_response_id(), answer=answer, args_done_seen=True, aborted=False)
-    audit_logger.write(audit_from_result(result, n, "dry-run"))
-    runtime_state.inc_request()
-    runtime_state.mark_success(args_done=False, aborted=False)
-    return result
-
-
 @app.get("/")
 async def root() -> dict[str, Any]:
-    return {"service": "bill015-local-proxy", "version": PROJECT_VERSION, "health": "/healthz", "models": "/v1/models"}
+    return {"service": "bill015-linux-proxy", "version": PROJECT_VERSION, "health": "/healthz", "models": "/v1/models"}
 
 
 @app.get("/healthz")
@@ -210,15 +151,12 @@ async def healthz() -> dict[str, Any]:
         "port": settings.port,
         "max_concurrency": settings.max_concurrency,
         "max_queue_size": settings.max_queue_size,
-        "queue_wait_timeout_ms": settings.queue_wait_timeout_ms,
-        "request_total_timeout_ms": settings.request_total_timeout_ms,
-        "strict_zero": settings.strict_zero,
         "safe_bridge": {
             "force_emit_value": settings.force_emit_value,
             "block_passthrough": settings.block_passthrough,
             "block_normal_mode": settings.block_normal_mode,
         },
-        "config_warnings": getattr(settings, "config_warnings", []),
+        "config_warnings": settings.config_warnings,
         "metrics": runtime_state.snapshot(),
         "upstream_keys": upstream_key_pool(settings).snapshot(),
     }
@@ -229,12 +167,10 @@ async def metrics() -> dict[str, Any]:
     return runtime_state.snapshot()
 
 
-
-
 @app.get("/v1")
 async def v1_root() -> dict[str, Any]:
     return {
-        "service": "bill015-local-proxy",
+        "service": "bill015-linux-proxy",
         "object": "api_root",
         "compatible": ["openai_responses", "openai_chat_completions"],
         "responses": "/v1/responses",
@@ -249,165 +185,52 @@ async def models() -> dict[str, Any]:
     now = int(time.time())
     return {
         "object": "list",
-        "data": [
-            {"id": mid, "object": "model", "created": now, "owned_by": "bill015-local-proxy"}
-            for mid in settings.public_model_ids()
-        ],
+        "data": [{"id": mid, "object": "model", "created": now, "owned_by": "bill015-linux-proxy"} for mid in settings.public_model_ids()],
     }
-
-
-def _force_compaction_metadata(body: dict[str, Any]) -> dict[str, Any]:
-    body = dict(body)
-    body["tools"] = []
-    body["parallel_tool_calls"] = False
-    cm = dict(body.get("client_metadata") or {})
-    raw = cm.get("x-codex-turn-metadata")
-    try:
-        md = json.loads(raw) if isinstance(raw, str) and raw else {}
-    except Exception:
-        md = {}
-    if not isinstance(md, dict):
-        md = {}
-    md["request_kind"] = "compaction"
-    md.setdefault("compaction", {"trigger": "explicit", "reason": "responses_compact_endpoint", "implementation": "responses", "phase": "mid_turn", "strategy": "memento"})
-    cm["x-codex-turn-metadata"] = json.dumps(md, ensure_ascii=False)
-    body["client_metadata"] = cm
-    return body
 
 
 async def handle_responses_body(body: dict[str, Any], request_headers: dict[str, str] | None = None):
     try:
-        body, image_replacements = sanitize_unsupported_image_inputs(body)
+        turn = normalize_responses_request(body, request_headers=codex_request_headers(request_headers))
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"code": "local_proxy_vision_unsupported", "message": str(e)}) from e
-    request_headers = codex_request_headers(request_headers)
-    n = normalize_responses_request(body, request_headers=request_headers)
     mode = active_mode()
     if mode == "circuit-open":
         raise HTTPException(status_code=503, detail="circuit breaker open after consecutive upstream failures")
-
     if mode == "dry-run":
-        dry = dry_run_response(n)
-        if n.want_stream:
-            answer = json.dumps(dry, ensure_ascii=False, indent=2)
-            rid = local_response_id()
-            return StreamingResponse(responses_sse_generator(synthetic_result(answer, n), n, rid), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
-        result = Bill015Result(local_request_id=dry["id"], answer=json.dumps(dry, ensure_ascii=False), args_done_seen=False, aborted=False)
+        dry = dry_run_response(turn)
+        if turn.want_stream:
+            result = TurnResult(local_request_id=dry["id"], answer=json.dumps(dry, ensure_ascii=False), args_done_seen=False)
+            return StreamingResponse(
+                responses_sse_generator(_const(result), turn, dry["id"]),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
         runtime_state.inc_request()
-        runtime_state.mark_success(args_done=False, aborted=False)
-        audit_logger.write(audit_from_result(result, n, "dry-run"))
+        runtime_state.mark_success()
+        audit_logger.write(audit_from_result(TurnResult(local_request_id=dry["id"]), turn, "dry-run"))
         return JSONResponse(dry)
 
     needs_passthrough, passthrough_reason = request_needs_passthrough(body)
-    if mode in {"exploit", "verify"} and needs_passthrough:
-        if settings.block_passthrough:
-            runtime_state.inc_request()
-            runtime_state.mark_error(f"safe bridge policy blocked auto-passthrough: {passthrough_reason}")
-            audit_logger.write({
-                "local_request_id": local_response_id(),
-                "mode": "passthrough-blocked",
-                "client_api": "responses",
-                "model": n.model,
-                "block_passthrough": settings.block_passthrough,
-                "reason": passthrough_reason,
-                "image_replacements": image_replacements,
-                "prompt_chars": len(n.user_input),
-            })
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "safe bridge policy blocked auto-passthrough because this request needs native upstream "
-                    f"passthrough ({passthrough_reason}). This prevents accidental billable/non-aborted calls."
-                ),
-            )
-        runtime_state.inc_request()
-        runtime_state.mark_fallback()
-        audit_logger.write({
-            "local_request_id": local_response_id(),
-            "mode": "auto-passthrough",
-            "client_api": "responses",
-            "model": n.model,
-            "strict_zero": settings.strict_zero,
-            "reason": passthrough_reason,
-            "image_replacements": image_replacements,
-            "prompt_chars": len(n.user_input),
-        })
-        if n.want_stream:
-            return StreamingResponse(normal_forward_stream(body, request_headers=request_headers), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
-        return JSONResponse(await normal_forward_json(body, request_headers=request_headers))
-
+    if mode in {"exploit", "verify"} and needs_passthrough and settings.block_passthrough:
+        raise HTTPException(
+            status_code=422,
+            detail=f"safe bridge policy blocked auto-passthrough because this request needs native upstream passthrough ({passthrough_reason}).",
+        )
     if mode == "normal":
         if settings.block_normal_mode:
-            runtime_state.inc_request()
-            runtime_state.mark_error("safe bridge policy blocked normal forwarding")
-            audit_logger.write({
-                "local_request_id": local_response_id(),
-                "mode": "normal-blocked",
-                "client_api": "responses",
-                "model": n.model,
-                "block_normal_mode": settings.block_normal_mode,
-                "prompt_chars": len(n.user_input),
-            })
             raise HTTPException(status_code=409, detail="safe bridge policy blocked normal forwarding; use exploit/verify BILL-015 bridge mode.")
-        runtime_state.inc_request()
-        runtime_state.mark_fallback()
-        audit_logger.write({"local_request_id": local_response_id(), "mode": "normal", "client_api": "responses", "model": n.model, "block_normal_mode": settings.block_normal_mode, "prompt_chars": len(n.user_input)})
-        if n.want_stream:
-            return StreamingResponse(normal_forward_stream(body, request_headers=request_headers), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
-        return JSONResponse(await normal_forward_json(body, request_headers=request_headers))
+        mode = "exploit"
 
-    if n.want_stream:
+    if turn.want_stream:
         rid = local_response_id()
-        return StreamingResponse(responses_sse_generator(run_and_record(n, mode, rid), n, rid), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
-    result = await run_and_record(n, mode)
-    return JSONResponse(response_json(result, n))
-
-
-async def handle_responses_compact_body(body: dict[str, Any], request_headers: dict[str, str] | None = None):
-    """Native `/v1/responses/compact` compatibility.
-
-    Upstream Codex's compact endpoint is unary JSON and returns
-    `{ "output": Vec<ResponseItem> }`, not a normal Response object or SSE
-    stream. Keep the BILL-015 bridge path for strict_zero/low-usage semantics,
-    but wrap the produced handoff summary in the same ResponseItem shape.
-    """
-    body, _image_replacements = sanitize_unsupported_image_inputs(body)
-    compact_body = _force_compaction_metadata(body)
-    compact_body["stream"] = False
-    request_headers = codex_request_headers(request_headers)
-    n = normalize_responses_request(compact_body, request_headers=request_headers)
-    mode = active_mode()
-    if mode == "circuit-open":
-        raise HTTPException(status_code=503, detail="circuit breaker open after consecutive upstream failures")
-
-    if mode == "dry-run":
-        answer = "CONTEXT CHECKPOINT COMPACTION dry-run summary."
-        result = Bill015Result(local_request_id=local_response_id(), answer=answer, args_done_seen=False, aborted=False)
-        audit_logger.write(audit_from_result(result, n, "dry-run"))
-        runtime_state.inc_request()
-        runtime_state.mark_success(args_done=False, aborted=False)
-    elif mode == "normal" and settings.block_normal_mode:
-        runtime_state.inc_request()
-        runtime_state.mark_error("safe bridge policy blocked normal compact forwarding")
-        raise HTTPException(status_code=409, detail="safe bridge policy blocked normal compact forwarding; use exploit/verify BILL-015 bridge mode.")
-    else:
-        if mode == "normal":
-            mode = "exploit"
-        result = await run_and_record(n, mode)
-
-    item_id = "msg_" + result.local_request_id.removeprefix("resp_local_")[:18] + "_compact"
-    return JSONResponse(
-        {
-            "output": [
-                {
-                    "id": item_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": result.answer}],
-                }
-            ]
-        }
-    )
+        return StreamingResponse(
+            responses_sse_generator(run_and_record(turn, mode, rid), turn, rid),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    result = await run_and_record(turn, mode)
+    return JSONResponse(response_json(result, turn))
 
 
 @app.post("/v1/responses")
@@ -417,36 +240,59 @@ async def responses(request: Request):
 
 @app.post("/v1/responses/compact")
 async def responses_compact(request: Request):
-    return await handle_responses_compact_body(await read_json_body(request), dict(request.headers))
+    body = await read_json_body(request)
+    body = dict(body)
+    body["stream"] = False
+    cm = dict(body.get("client_metadata") or {})
+    raw = cm.get("x-codex-turn-metadata")
+    try:
+        md = json.loads(raw) if isinstance(raw, str) and raw else {}
+    except Exception:
+        md = {}
+    if not isinstance(md, dict):
+        md = {}
+    md["request_kind"] = "compaction"
+    cm["x-codex-turn-metadata"] = json.dumps(md, ensure_ascii=False)
+    body["client_metadata"] = cm
+    try:
+        turn = normalize_responses_request(body, request_headers=codex_request_headers(dict(request.headers)))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"code": "local_proxy_vision_unsupported", "message": str(e)}) from e
+    turn.is_compaction = True
+    turn.request_kind = "compaction"
+    mode = active_mode()
+    if mode == "dry-run":
+        result = TurnResult(local_request_id=local_response_id(), answer="Compact dry-run summary.", args_done_seen=False)
+    else:
+        if mode == "normal":
+            if settings.block_normal_mode:
+                raise HTTPException(status_code=409, detail="safe bridge policy blocked normal compact forwarding")
+            mode = "exploit"
+        result = await run_and_record(turn, mode)
+    return JSONResponse(compact_output(result))
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     try:
-        body, _image_replacements = sanitize_unsupported_image_inputs(await read_json_body(request))
+        turn = normalize_chat_request(await read_json_body(request), request_headers=codex_request_headers(dict(request.headers)))
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"code": "local_proxy_vision_unsupported", "message": str(e)}) from e
-    n = normalize_chat_request(body, request_headers=codex_request_headers(dict(request.headers)))
     mode = active_mode()
     if mode == "circuit-open":
         raise HTTPException(status_code=503, detail="circuit breaker open after consecutive upstream failures")
-
     if mode == "dry-run":
-        dry = dry_run_response(n)
-        answer = json.dumps(dry, ensure_ascii=False, indent=2)
-        if n.want_stream:
-            return StreamingResponse(chat_sse_generator(synthetic_result(answer, n), n), media_type="text/event-stream")
-        result = await synthetic_result(answer, n)
-        return JSONResponse(chat_json(result, n))
-
+        dry = dry_run_response(turn)
+        result = TurnResult(local_request_id=dry["id"], answer=json.dumps(dry, ensure_ascii=False))
+        if turn.want_stream:
+            return StreamingResponse(chat_sse_generator(_const(result), turn), media_type="text/event-stream")
+        return JSONResponse(chat_json(result, turn))
     if mode == "normal":
-        # Chat is normalized into Responses for compatibility instead of direct /chat upstream.
         mode = "exploit"
-
-    if n.want_stream:
-        return StreamingResponse(chat_sse_generator(run_and_record(n, mode), n), media_type="text/event-stream")
-    result = await run_and_record(n, mode)
-    return JSONResponse(chat_json(result, n))
+    if turn.want_stream:
+        return StreamingResponse(chat_sse_generator(run_and_record(turn, mode), turn), media_type="text/event-stream")
+    result = await run_and_record(turn, mode)
+    return JSONResponse(chat_json(result, turn))
 
 
 @app.post("/admin/mode")
@@ -469,20 +315,6 @@ async def admin_recent(n: int = 20, authorization: str | None = Header(default=N
     return {"items": audit_logger.recent(n)}
 
 
-@app.post("/admin/replay")
-async def admin_replay(request: Request, authorization: str | None = Header(default=None)):
-    require_admin(authorization)
-    body = await read_json_body(request)
-    # Safe default: replay is dry-run unless explicit allow_real=true.
-    allow_real = bool(body.pop("allow_real", False))
-    n = normalize_responses_request(body)
-    if not allow_real:
-        return JSONResponse(dry_run_response(n, mode="dry-run"))
-    result = await run_and_record(n, "verify")
-    return JSONResponse(response_json(result, n))
-
-
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"error": {"message": exc.detail, "type": "local_proxy_error"}})
-

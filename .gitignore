@@ -39,3 +39,10 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# Rewrite leftovers and local tooling
+app/_legacy/
+tests/_legacy/
+.hermes/
+diagnostic_backup_*/
+artifacts/

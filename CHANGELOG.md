@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.0] - 2026-09-08
+
+### Changed
+- Rewrote the proxy for Linux Codex Desktop: package layout (`config`, `ingest`, `context`, `bridge`, `upstream`, `replay`, `ops`) replaces the previous flat modules.
+- Upstream `emit_value` now allows multiple wrapper calls per turn (`parallel_tool_calls=true`) and aborts after a complete batch, still before usage finalize.
+- Context packing is a token-budget knapsack: current user request > latest tool batch > history tail, with explicit loss notices.
+- Replay SSE matches what Codex Desktop consumes: dispatch on `output_item.done`, `apply_patch` input deltas, `tool_search` object arguments, required `response.completed`.
+- Start path is `scripts/start_local_proxy.sh`. Windows cmd/ps1 scripts are no longer the documented entry.
+
 ## [0.4.13] - 2026-07-21
 
 ### Added

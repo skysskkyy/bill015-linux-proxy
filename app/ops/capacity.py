@@ -17,7 +17,7 @@ class QueueWaitTimeoutError(Exception):
 
 @dataclass
 class CapacityLease:
-    limiter: "CapacityLimiter"
+    limiter: CapacityLimiter
     queue_wait_ms: int
     released: bool = False
 
@@ -29,8 +29,6 @@ class CapacityLease:
 
 
 class CapacityLimiter:
-    """Bound active work and the number of coroutines allowed to queue."""
-
     def __init__(self, max_active: int, max_queue: int, queue_timeout_ms: int, state: RuntimeState) -> None:
         self.max_active = max(1, int(max_active))
         self.max_queue = max(0, int(max_queue))

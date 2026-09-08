@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any, Dict
+from typing import Any
 
 
 @dataclass
@@ -25,7 +25,7 @@ class RuntimeState:
     request_timeout_total: int = 0
     lock: Lock = field(default_factory=Lock)
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         with self.lock:
             return {
                 "started_at": self.started_at,

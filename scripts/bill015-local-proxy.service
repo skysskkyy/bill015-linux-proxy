@@ -1,0 +1,13 @@
+[Unit]
+Description=BILL-015 Linux Codex Desktop Proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/src/bill015_local_proxy
+ExecStart=%h/.local/src/bill015_local_proxy/scripts/start_local_proxy.sh
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

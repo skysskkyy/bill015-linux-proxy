@@ -1,10 +1,12 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+norecursedirs = ["app/_legacy", "tests/_legacy", ".git", ".hermes"]
 
 [tool.ruff]
 line-length = 140
 target-version = "py314"
+exclude = ["app/_legacy", "tests/_legacy"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]

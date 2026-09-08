@@ -33,21 +33,20 @@ class ModelConfig(StrictConfigModel):
 
 
 class Bill015Config(StrictConfigModel):
-    bridge_strategy: Literal["native_tool_first", "emit_value"] | None = None
     function_name: str | None = None
-    final_answer_tool_name: str | None = None
-    native_tool_choice: str | None = None
-    native_parallel_tool_calls: bool | None = None
     answer_field: str | None = None
     max_output_tokens: int | None = None
     compaction_max_output_tokens: int | None = None
     max_answer_chars: int | None = None
-    strict_zero: bool | None = None
     force_emit_value: bool | None = None
     block_passthrough: bool | None = None
     block_normal_mode: bool | None = None
     max_tool_argument_chars: int | None = None
     max_total_emit_value_chars: int | None = None
+    max_emit_value_calls: int | None = None
+    emit_value_quiet_ms: int | None = None
+    strict_zero: bool | None = None
+    malformed_retries: int | None = None
 
 
 class LoggingConfig(StrictConfigModel):
@@ -55,32 +54,19 @@ class LoggingConfig(StrictConfigModel):
     store_prompts: bool | None = None
     store_answers: bool | None = None
     rotate_mb: int | None = None
+    payload_probe: bool | None = None
 
 
 class UsageConfig(StrictConfigModel):
     estimator: str | None = None
     prefer_tiktoken: bool | None = None
     include_tools_schema: bool | None = None
-    include_images: bool | None = None
-    cache_ratio_default: float | None = None
     max_text_for_exact_tokenize: int | None = None
-    audit_breakdown: bool | None = None
 
 
 class ReasoningConfig(StrictConfigModel):
     effort: str | None = None
     summary: str | None = None
-
-
-class ResponsesEventsConfig(StrictConfigModel):
-    fidelity_level: str | None = None
-    emit_reasoning_summary: bool | None = None
-    emit_annotations: bool | None = None
-    allow_web_search_call_event: bool | None = None
-    emit_incomplete_on_truncation: bool | None = None
-    strict_sequence_numbers: bool | None = None
-    typed_keepalive: bool | None = None
-    chunk_size: int | None = None
 
 
 class LimitsConfig(StrictConfigModel):
@@ -107,6 +93,8 @@ class LimitsConfig(StrictConfigModel):
 class KeyPoolConfig(StrictConfigModel):
     cyber_policy_rotate: bool | None = None
     failed_key_cooldown_seconds: float | None = None
+    max_policy_rotations_per_request: int | None = None
+    cyber_policy_retry_delay_seconds: float | None = None
 
 
 class AdminConfig(StrictConfigModel):
@@ -115,7 +103,6 @@ class AdminConfig(StrictConfigModel):
 
 class ToolBridgeConfig(StrictConfigModel):
     allow_unknown_tools: bool | None = None
-    auto_expand_search: bool | None = None
     local_web_research_preflight: bool | None = None
     schema_max_tools: int | None = None
     selection_max_tools: int | None = None
@@ -137,16 +124,15 @@ class LocalConfigSchema(StrictConfigModel):
     logging: LoggingConfig | None = None
     usage: UsageConfig | None = None
     reasoning: ReasoningConfig | None = None
-    responses_events: ResponsesEventsConfig | None = None
     limits: LimitsConfig | None = None
     key_pool: KeyPoolConfig | None = None
     admin: AdminConfig | None = None
     tool_bridge: ToolBridgeConfig | None = None
     multimodal: MultimodalConfig | None = None
+    responses_events: dict[str, Any] | None = None
 
 
 def validate_local_config(obj: dict[str, Any]) -> list[str]:
-    """Return human-readable schema warnings without blocking local startup."""
     try:
         LocalConfigSchema.model_validate(obj)
         return []

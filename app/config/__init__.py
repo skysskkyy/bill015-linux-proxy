@@ -4,22 +4,37 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Literal
+from typing import Any, Literal
 
-from .config_schema import validate_local_config
+from .schema import validate_local_config
 
 Mode = Literal["exploit", "verify", "normal", "dry-run"]
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.local.json"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_WARNINGS: list[str] = []
+
+
+def _xdg_config_path() -> Path:
+    base = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "bill015" / "config.json"
+
+
+def _resolve_config_path() -> Path:
+    raw = os.getenv("BILL015_CONFIG_PATH", "").strip()
+    if raw:
+        return Path(raw)
+    local = PROJECT_ROOT / "config.local.json"
+    if local.exists():
+        return local
+    xdg = _xdg_config_path()
+    if xdg.exists():
+        return xdg
+    return local
 
 
 def _load_local_config() -> dict[str, Any]:
     global CONFIG_WARNINGS
     CONFIG_WARNINGS = []
-    # Default behavior: read local project config. An env override is kept only for tests/advanced use.
-    raw_path = os.getenv("BILL015_CONFIG_PATH", "")
-    path = Path(raw_path) if raw_path else DEFAULT_CONFIG_PATH
+    path = _resolve_config_path()
     if not path.exists():
         return {}
     try:
@@ -35,6 +50,7 @@ def _load_local_config() -> dict[str, Any]:
 
 
 LOCAL_CONFIG = _load_local_config()
+DEFAULT_CONFIG_PATH = _resolve_config_path()
 
 
 def _cfg(path: str, default: Any = None) -> Any:
@@ -85,7 +101,7 @@ def _env_float(name: str, cfg_path: str, default: float) -> float:
         return default
 
 
-def _cfg_dict(path: str, default: Dict[str, str]) -> Dict[str, str]:
+def _cfg_dict(path: str, default: dict[str, str]) -> dict[str, str]:
     val = _cfg(path, default)
     if isinstance(val, dict):
         return {str(k): str(v) for k, v in val.items()}
@@ -102,7 +118,6 @@ def _cfg_list(path: str, default: list[str]) -> list[str]:
 
 
 def _legacy_strict_zero_default() -> bool:
-    """Compatibility fallback for configs created before 0.4.11."""
     return _env_bool("BILL015_STRICT_ZERO", "bill015.strict_zero", True)
 
 
@@ -112,24 +127,29 @@ class Settings:
     host: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_HOST", "server.host", "127.0.0.1"))
     port: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_PORT", "server.port", 8787))
     cors_allow_origins: list[str] = field(default_factory=lambda: _cfg_list("server.cors_allow_origins", []))
-    cors_allow_origin_regex: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_CORS_ALLOW_ORIGIN_REGEX", "server.cors_allow_origin_regex", r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"))
+    cors_allow_origin_regex: str = field(
+        default_factory=lambda: _env_str(
+            "LOCAL_PROXY_CORS_ALLOW_ORIGIN_REGEX",
+            "server.cors_allow_origin_regex",
+            r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        )
+    )
     mode: Mode = field(default_factory=lambda: _env_str("LOCAL_PROXY_MODE", "mode", "exploit").strip().lower())  # type: ignore[assignment]
     upstream_base_url: str = field(default_factory=lambda: _env_str("PACKY_BASE_URL", "upstream.base_url", "https://packyapi.com").rstrip("/"))
     upstream_api_key_env: str = field(default_factory=lambda: _env_str("PACKY_API_KEY_ENV", "upstream.api_key_env", "PACKY_API_KEY"))
     upstream_api_key_file_value: str = field(default_factory=lambda: _env_str("", "upstream.api_key", ""))
     upstream_api_keys_file_value: list[str] = field(default_factory=lambda: _cfg_list("upstream.api_keys", []))
     default_model: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_MODEL", "model.default", "gpt-5.5"))
-    model_aliases: Dict[str, str] = field(default_factory=lambda: _cfg_dict("model.aliases", {"codex-gpt55": "gpt-5.5", "codex-gpt54": "gpt-5.4"}))
+    model_aliases: dict[str, str] = field(
+        default_factory=lambda: _cfg_dict("model.aliases", {"codex-gpt55": "gpt-5.5", "codex-gpt54": "gpt-5.4"})
+    )
     force_default_model: bool = field(default_factory=lambda: _env_bool("LOCAL_PROXY_FORCE_DEFAULT_MODEL", "model.force_default", False))
-    bridge_strategy: str = field(default_factory=lambda: _env_str("BILL015_BRIDGE_STRATEGY", "bill015.bridge_strategy", "emit_value"))
     function_name: str = field(default_factory=lambda: _env_str("BILL015_FUNCTION_NAME", "bill015.function_name", "emit_value"))
-    final_answer_tool_name: str = field(default_factory=lambda: _env_str("BILL015_FINAL_ANSWER_TOOL_NAME", "bill015.final_answer_tool_name", "submit_final_answer"))
-    native_tool_choice: str = field(default_factory=lambda: _env_str("BILL015_NATIVE_TOOL_CHOICE", "bill015.native_tool_choice", "required"))
-    native_parallel_tool_calls: bool = field(default_factory=lambda: _env_bool("BILL015_NATIVE_PARALLEL_TOOL_CALLS", "bill015.native_parallel_tool_calls", False))
     answer_field: str = field(default_factory=lambda: _env_str("BILL015_ANSWER_FIELD", "bill015.answer_field", "answer"))
     max_output_tokens: int = field(default_factory=lambda: _env_int("BILL015_MAX_OUTPUT_TOKENS", "bill015.max_output_tokens", 8192))
-    compaction_max_output_tokens: int = field(default_factory=lambda: _env_int("BILL015_COMPACTION_MAX_OUTPUT_TOKENS", "bill015.compaction_max_output_tokens", 8192))
-    strict_zero: bool = field(default_factory=lambda: _env_bool("BILL015_STRICT_ZERO", "bill015.strict_zero", True))
+    compaction_max_output_tokens: int = field(
+        default_factory=lambda: _env_int("BILL015_COMPACTION_MAX_OUTPUT_TOKENS", "bill015.compaction_max_output_tokens", 8192)
+    )
     force_emit_value: bool = field(
         default_factory=lambda: _env_bool("BILL015_FORCE_EMIT_VALUE", "bill015.force_emit_value", _legacy_strict_zero_default())
     )
@@ -139,72 +159,72 @@ class Settings:
     block_normal_mode: bool = field(
         default_factory=lambda: _env_bool("BILL015_BLOCK_NORMAL_MODE", "bill015.block_normal_mode", _legacy_strict_zero_default())
     )
-    reasoning_effort: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_EFFORT", "reasoning.effort", ""))
-    reasoning_summary: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_SUMMARY", "reasoning.summary", ""))
+    reasoning_effort: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_EFFORT", "reasoning.effort", "high"))
+    reasoning_summary: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_REASONING_SUMMARY", "reasoning.summary", "auto"))
     max_answer_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_ANSWER_CHARS", "bill015.max_answer_chars", 65536))
     max_tool_argument_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_TOOL_ARGUMENT_CHARS", "bill015.max_tool_argument_chars", 262144))
     max_total_emit_value_chars: int = field(default_factory=lambda: _env_int("BILL015_MAX_TOTAL_EMIT_VALUE_CHARS", "bill015.max_total_emit_value_chars", 393216))
+    max_emit_value_calls: int = field(default_factory=lambda: _env_int("BILL015_MAX_EMIT_VALUE_CALLS", "bill015.max_emit_value_calls", 8))
+    emit_value_quiet_ms: int = field(default_factory=lambda: _env_int("BILL015_EMIT_VALUE_QUIET_MS", "bill015.emit_value_quiet_ms", 250))
     max_request_bytes: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_REQUEST_BYTES", "limits.max_request_bytes", 1048576))
     max_concurrency: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_CONCURRENCY", "limits.max_concurrency", 12))
     max_queue_size: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_MAX_QUEUE_SIZE", "limits.max_queue_size", 8))
     queue_wait_timeout_ms: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_QUEUE_WAIT_TIMEOUT_MS", "limits.queue_wait_timeout_ms", 60000))
     request_total_timeout_ms: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_REQUEST_TOTAL_TIMEOUT_MS", "limits.request_total_timeout_ms", 1200000))
-    # 0 means disabled/infinite. Positive values are enforced by upstream.py.
-    upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 900.0))
+    upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 600.0))
     upstream_retries: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRIES", "limits.upstream_retries", 2))
     upstream_retry_backoff_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRY_BACKOFF_MS", "limits.upstream_retry_backoff_ms", 700))
     context_window_tokens: int = field(default_factory=lambda: _env_int("BILL015_CONTEXT_WINDOW_TOKENS", "limits.context_window_tokens", 128000))
     auto_compact_percent: int = field(default_factory=lambda: _env_int("BILL015_AUTO_COMPACT_PERCENT", "limits.auto_compact_percent", 90))
     compact_target_percent: int = field(default_factory=lambda: _env_int("BILL015_COMPACT_TARGET_PERCENT", "limits.compact_target_percent", 75))
-    context_recovery_retries: int = field(default_factory=lambda: _env_int("BILL015_CONTEXT_RECOVERY_RETRIES", "limits.context_recovery_retries", 3))
-    empty_stream_retries: int = field(default_factory=lambda: _env_int("BILL015_EMPTY_STREAM_RETRIES", "limits.empty_stream_retries", 2))
-    stream_recovery_retries: int = field(default_factory=lambda: _env_int("BILL015_STREAM_RECOVERY_RETRIES", "limits.stream_recovery_retries", 2))
+    context_recovery_retries: int = field(default_factory=lambda: _env_int("BILL015_CONTEXT_RECOVERY_RETRIES", "limits.context_recovery_retries", 2))
+    empty_stream_retries: int = field(default_factory=lambda: _env_int("BILL015_EMPTY_STREAM_RETRIES", "limits.empty_stream_retries", 1))
+    stream_recovery_retries: int = field(default_factory=lambda: _env_int("BILL015_STREAM_RECOVERY_RETRIES", "limits.stream_recovery_retries", 1))
     latest_tool_output_max_chars: int = field(default_factory=lambda: _env_int("BILL015_LATEST_TOOL_OUTPUT_MAX_CHARS", "limits.latest_tool_output_max_chars", 12000))
-    args_done_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_ARGS_DONE_TIMEOUT_MS", "limits.args_done_timeout_ms", 900000))
-    upstream_idle_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_IDLE_TIMEOUT_MS", "limits.upstream_idle_timeout_ms", 900000))
+    args_done_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_ARGS_DONE_TIMEOUT_MS", "limits.args_done_timeout_ms", 600000))
+    upstream_idle_timeout_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_IDLE_TIMEOUT_MS", "limits.upstream_idle_timeout_ms", 300000))
     client_heartbeat_interval_ms: int = field(default_factory=lambda: _env_int("BILL015_CLIENT_HEARTBEAT_INTERVAL_MS", "limits.client_heartbeat_interval_ms", 5000))
+    circuit_failures: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_CIRCUIT_FAILURES", "limits.circuit_failures", 0))
     cyber_policy_rotate: bool = field(default_factory=lambda: _env_bool("BILL015_CYBER_POLICY_ROTATE", "key_pool.cyber_policy_rotate", True))
     failed_key_cooldown_seconds: float = field(default_factory=lambda: _env_float("BILL015_FAILED_KEY_COOLDOWN_SECONDS", "key_pool.failed_key_cooldown_seconds", 600.0))
+    max_policy_rotations_per_request: int = field(
+        default_factory=lambda: _env_int("BILL015_MAX_POLICY_ROTATIONS_PER_REQUEST", "key_pool.max_policy_rotations_per_request", 8)
+    )
+    cyber_policy_retry_delay_seconds: float = field(
+        default_factory=lambda: _env_float("BILL015_CYBER_POLICY_RETRY_DELAY_SECONDS", "key_pool.cyber_policy_retry_delay_seconds", 0.0)
+    )
     evidence_dir: Path = field(default_factory=lambda: Path(_env_str("LOCAL_PROXY_LOG_DIR", "logging.dir", str(PROJECT_ROOT / "proxy_evidence"))))
     store_prompts: bool = field(default_factory=lambda: _env_bool("LOCAL_PROXY_STORE_PROMPTS", "logging.store_prompts", False))
     store_answers: bool = field(default_factory=lambda: _env_bool("LOCAL_PROXY_STORE_ANSWERS", "logging.store_answers", False))
     rotate_mb: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_LOG_ROTATE_MB", "logging.rotate_mb", 10))
     admin_token: str = field(default_factory=lambda: _env_str("LOCAL_PROXY_ADMIN_TOKEN", "admin.token", ""))
-    circuit_failures: int = field(default_factory=lambda: _env_int("LOCAL_PROXY_CIRCUIT_FAILURES", "limits.circuit_failures", 0))
     packy_cookie: str = field(default_factory=lambda: _env_str("PACKY_COOKIE", "upstream.cookie", ""))
-    packy_user_id: str = field(default_factory=lambda: _env_str("PACKY_USER_ID", "upstream.user_id", "192833"))
-    usage_estimator: str = field(default_factory=lambda: _env_str("BILL015_USAGE_ESTIMATOR", "usage.estimator", "auto"))
+    packy_user_id: str = field(default_factory=lambda: _env_str("PACKY_USER_ID", "upstream.user_id", ""))
     usage_prefer_tiktoken: bool = field(default_factory=lambda: _env_bool("BILL015_USAGE_PREFER_TIKTOKEN", "usage.prefer_tiktoken", True))
-    usage_include_tools_schema: bool = field(default_factory=lambda: _env_bool("BILL015_USAGE_INCLUDE_TOOLS_SCHEMA", "usage.include_tools_schema", True))
-    usage_include_images: bool = field(default_factory=lambda: _env_bool("BILL015_USAGE_INCLUDE_IMAGES", "usage.include_images", True))
-    usage_cache_ratio_default: float = field(default_factory=lambda: _env_float("BILL015_USAGE_CACHE_RATIO_DEFAULT", "usage.cache_ratio_default", 0.85))
-    usage_max_text_for_exact_tokenize: int = field(default_factory=lambda: _env_int("BILL015_USAGE_MAX_TEXT_FOR_EXACT_TOKENIZE", "usage.max_text_for_exact_tokenize", 120000))
-    usage_audit_breakdown: bool = field(default_factory=lambda: _env_bool("BILL015_USAGE_AUDIT_BREAKDOWN", "usage.audit_breakdown", True))
-    responses_fidelity_level: str = field(default_factory=lambda: _env_str("BILL015_RESPONSES_FIDELITY_LEVEL", "responses_events.fidelity_level", "native"))
-    responses_emit_reasoning_summary: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_EMIT_REASONING_SUMMARY", "responses_events.emit_reasoning_summary", False))
-    responses_emit_annotations: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_EMIT_ANNOTATIONS", "responses_events.emit_annotations", True))
-    responses_allow_web_search_call_event: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_ALLOW_WEB_SEARCH_CALL_EVENT", "responses_events.allow_web_search_call_event", False))
-    responses_emit_incomplete_on_truncation: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_EMIT_INCOMPLETE_ON_TRUNCATION", "responses_events.emit_incomplete_on_truncation", True))
-    responses_strict_sequence_numbers: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_STRICT_SEQUENCE_NUMBERS", "responses_events.strict_sequence_numbers", True))
-    responses_typed_keepalive: bool = field(default_factory=lambda: _env_bool("BILL015_RESPONSES_TYPED_KEEPALIVE", "responses_events.typed_keepalive", False))
-    responses_chunk_size: int = field(default_factory=lambda: _env_int("BILL015_RESPONSES_CHUNK_SIZE", "responses_events.chunk_size", 256))
-    tool_bridge_allow_unknown_tools: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_ALLOW_UNKNOWN_TOOLS", "tool_bridge.allow_unknown_tools", False))
-    tool_bridge_auto_expand_search: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_AUTO_EXPAND_SEARCH", "tool_bridge.auto_expand_search", False))
-    tool_bridge_local_web_research_preflight: bool = field(default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_LOCAL_WEB_RESEARCH_PREFLIGHT", "tool_bridge.local_web_research_preflight", True))
+    usage_max_text_for_exact_tokenize: int = field(
+        default_factory=lambda: _env_int("BILL015_USAGE_MAX_TEXT_FOR_EXACT_TOKENIZE", "usage.max_text_for_exact_tokenize", 120000)
+    )
+    tool_bridge_allow_unknown_tools: bool = field(
+        default_factory=lambda: _env_bool("BILL015_TOOL_BRIDGE_ALLOW_UNKNOWN_TOOLS", "tool_bridge.allow_unknown_tools", False)
+    )
+    tool_bridge_local_web_research_preflight: bool = field(
+        default_factory=lambda: _env_bool(
+            "BILL015_TOOL_BRIDGE_LOCAL_WEB_RESEARCH_PREFLIGHT", "tool_bridge.local_web_research_preflight", True
+        )
+    )
     tool_bridge_schema_max_tools: int = field(default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_SCHEMA_MAX_TOOLS", "tool_bridge.schema_max_tools", 256))
-    tool_bridge_selection_max_tools: int = field(default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_SELECTION_MAX_TOOLS", "tool_bridge.selection_max_tools", 160))
+    tool_bridge_selection_max_tools: int = field(
+        default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_SELECTION_MAX_TOOLS", "tool_bridge.selection_max_tools", 160)
+    )
     tool_bridge_catalog_max_chars: int = field(default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_CATALOG_MAX_CHARS", "tool_bridge.catalog_max_chars", 120000))
     multimodal_strategy: str = field(default_factory=lambda: _env_str("BILL015_MULTIMODAL_STRATEGY", "multimodal.strategy", "reject").strip().lower())
     multimodal_max_images: int = field(default_factory=lambda: _env_int("BILL015_MULTIMODAL_MAX_IMAGES", "multimodal.max_images", 8))
     multimodal_max_image_bytes: int = field(default_factory=lambda: _env_int("BILL015_MULTIMODAL_MAX_IMAGE_BYTES", "multimodal.max_image_bytes", 10485760))
+    responses_chunk_size: int = field(default_factory=lambda: _env_int("BILL015_RESPONSES_CHUNK_SIZE", "responses_events.chunk_size", 256))
+    config_warnings: list[str] = field(default_factory=list)
 
     @property
     def upstream_api_keys(self) -> list[str]:
-        """Return the ordered, de-duplicated API key pool.
-
-        The environment variable keeps its legacy precedence as the primary
-        key. ``upstream.api_keys`` supplies additional rotation keys.
-        """
         env_value = os.getenv(self.upstream_api_key_env, "").strip()
         primary = env_value or self.upstream_api_key_file_value.strip()
         candidates = [primary, *self.upstream_api_keys_file_value]
@@ -218,15 +238,8 @@ class Settings:
     @property
     def upstream_configured(self) -> bool:
         return bool(self.upstream_api_keys)
-    def map_model(self, model: str | None) -> str:
-        """Map the client-requested model for the upstream call.
 
-        Earlier versions forced every unknown model to default_model, which made
-        switching Codex/CC Switch from gpt-5.5 to gpt-5.4 impossible. Default is
-        now native passthrough: aliases are still honored, an empty model uses
-        default_model, and force_default_model can be enabled only when the user
-        explicitly wants one fixed upstream model.
-        """
+    def map_model(self, model: str | None) -> str:
         if not model:
             return self.default_model
         mapped = self.model_aliases.get(str(model), str(model))
@@ -246,13 +259,6 @@ class Settings:
 
 settings = Settings()
 settings.validate_mode()
-if settings.bridge_strategy not in {"native_tool_first", "emit_value"}:
-    settings.bridge_strategy = "emit_value"
-if settings.force_emit_value and settings.bridge_strategy == "native_tool_first":
-    # Native-tool-first exposes real tools upstream and can let the provider
-    # account for prompt/output tokens before our local abort boundary.  In
-    # safe bridge mode fails closed back to the proven forced emit_value bridge.
-    settings.bridge_strategy = "emit_value"
 if settings.multimodal_strategy not in {"reject", "local_extract", "native_passthrough"}:
     settings.multimodal_strategy = "reject"
 settings.config_warnings = CONFIG_WARNINGS
