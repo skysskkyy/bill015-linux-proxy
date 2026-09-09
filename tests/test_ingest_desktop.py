@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.ingest import normalize_responses_request
-from app.ingest.catalog import build_catalog
+from app.ingest.catalog import build_catalog, catalog_json
 from app.main import app
 
 
@@ -29,6 +29,35 @@ def test_additional_tools_populate_catalog():
     assert {"shell_command", "apply_patch", "tool_search"} <= names
     assert turn.catalog.specs["apply_patch"].call_type == "custom"
     assert turn.catalog.specs["tool_search"].call_type == "tool_search"
+
+
+def test_catalog_json_keeps_full_description():
+    long_doc = "nodeRepl.write is required. " + ("session ownership and claimTab notes. " * 40)
+    catalog = build_catalog(
+        [
+            {
+                "type": "function",
+                "name": "js",
+                "namespace": "mcp__cua_repl",
+                "description": long_doc,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"code": {"type": "string", "description": "JavaScript source"}},
+                    "required": ["code"],
+                },
+                "examples": [{"code": "await browser.user.openTabs()"}],
+            }
+        ],
+        [],
+        query="chrome tabs",
+    )
+    blob = catalog_json(catalog)
+    assert long_doc in blob
+    assert "…" not in blob
+    assert '"code"' in blob
+    assert "JavaScript source" in blob
+    assert "await browser.user.openTabs()" in blob
+    assert '"required": ["code"]' in blob or '"required":["code"]' in blob
 
 
 def test_tool_search_output_extends_catalog():

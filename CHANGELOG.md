@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.3] - 2026-09-09
+
+### Changed
+- Keep full tool descriptions and native parameter schemas (types, required fields, examples) on `emit_value`; `arguments` is an object, not a flattened string.
+- Persona / system / client instructions are no longer truncated.
+- `mode=tool_call` may omit a status note; if a note is present it rides with the tools. Final replies stay `mode=answer` with `tool_calls=[]`.
+- Remove keyword progress-note classification (`app/bridge/progress.py`).
+- When context is over the compact threshold, call upstream `POST /v1/responses/compact` instead of dropping old items.
+- Per-model official context windows (gpt-6-astra / gpt-5.6 / gpt-5.5 / gpt-5.4 = 1,050,000).
+
+### Added
+- Replay reasoning items to Codex, including readable `summary` deltas and `encrypted_content` for the next turn.
+
+## [0.5.2] - 2026-09-09
+
+### Changed
+- Forward `input_image` parts unchanged (`multimodal.strategy=native_passthrough`).
+- Estimate image tokens from PNG/JPEG/GIF/WebP headers (85 + 170×tiles) instead of counting base64 as text.
+
 ## [0.5.1] - 2026-09-09
 
 ### Fixed

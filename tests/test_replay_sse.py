@@ -5,7 +5,7 @@ import asyncio
 from app.ingest.catalog import build_catalog
 from app.protocol.models import BridgeToolCall, Turn, TurnResult
 from app.protocol.sse import parse_sse_lines
-from app.replay.events import responses_sse_generator
+from app.replay.events import responses_sse_generator, visible_assistant_text
 
 
 def _turn() -> Turn:
@@ -64,6 +64,90 @@ def test_replay_ends_with_completed_and_dispatches_on_output_item_done():
     assert message_ids and all(str(i).startswith("msg") for i in message_ids)
     assert str(patch_done["item"]["id"]).startswith("ctc")
     assert str(search_done["item"]["id"]).startswith("tsc")
+
+
+def test_replay_uses_commentary_when_answer_empty():
+    result = TurnResult(
+        local_request_id="resp_local_empty",
+        answer="",
+        commentary="我先搜索东京葛饰区附近的饭店。",
+    )
+    assert visible_assistant_text(result) == "我先搜索东京葛饰区附近的饭店。"
+    blob = "".join(asyncio.run(_collect(result)))
+    events = list(parse_sse_lines(blob.splitlines()))
+    texts = []
+    for ev in events:
+        obj = ev.json or {}
+        if obj.get("type") == "response.output_text.delta":
+            texts.append(obj.get("delta") or "")
+        item = obj.get("item") if obj.get("type") == "response.output_item.done" else None
+        if isinstance(item, dict) and item.get("type") == "message":
+            content = item.get("content") or []
+            if content and isinstance(content[0], dict):
+                assert content[0].get("text") == "我先搜索东京葛饰区附近的饭店。"
+    assert "我先搜索东京葛饰区附近的饭店。" in "".join(texts)
+
+
+def test_replay_sends_reasoning_summary_to_codex():
+    result = TurnResult(
+        local_request_id="resp_local_sum",
+        answer="done",
+        reasoning_items=[
+            {
+                "id": "rs_visible",
+                "type": "reasoning",
+                "encrypted_content": "enc",
+                "summary": [{"type": "summary_text", "text": "先看标签再整理待办"}],
+                "content": [],
+            }
+        ],
+    )
+    blob = "".join(asyncio.run(_collect(result)))
+    events = list(parse_sse_lines(blob.splitlines()))
+    types = [(ev.json or {}).get("type") for ev in events if ev.json]
+    assert "response.reasoning_summary_text.delta" in types
+    assert "response.reasoning_summary_text.done" in types
+    deltas = "".join((ev.json or {}).get("delta") or "" for ev in events if (ev.json or {}).get("type") == "response.reasoning_summary_text.delta")
+    assert "先看标签再整理待办" in deltas
+    completed = next(ev.json for ev in events if ev.json and ev.json.get("type") == "response.completed")
+    assert completed["response"]["output"][0]["summary"][0]["text"] == "先看标签再整理待办"
+
+
+def test_replay_sends_reasoning_before_tools():
+    result = TurnResult(
+        local_request_id="resp_local_rs",
+        commentary="checking tabs",
+        tool_calls=[BridgeToolCall(id="call_js", name="js", arguments='{"code":"1"}', namespace="mcp__cua_repl")],
+        reasoning_items=[
+            {
+                "id": "rs_keep_memory",
+                "type": "reasoning",
+                "encrypted_content": "enc-turn-1",
+                "summary": [],
+                "content": [],
+            }
+        ],
+    )
+    blob = "".join(asyncio.run(_collect(result)))
+    events = list(parse_sse_lines(blob.splitlines()))
+    done_types = [
+        (ev.json or {}).get("item", {}).get("type")
+        for ev in events
+        if (ev.json or {}).get("type") == "response.output_item.done"
+    ]
+    assert done_types[0] == "reasoning"
+    reasoning_done = next(
+        ev.json
+        for ev in events
+        if ev.json
+        and ev.json.get("type") == "response.output_item.done"
+        and (ev.json.get("item") or {}).get("type") == "reasoning"
+    )
+    assert reasoning_done["item"]["encrypted_content"] == "enc-turn-1"
+    assert str(reasoning_done["item"]["id"]).startswith("rs")
+    completed = next(ev.json for ev in events if ev.json and ev.json.get("type") == "response.completed")
+    assert completed["response"]["output"][0]["type"] == "reasoning"
+    assert completed["response"]["output"][0]["encrypted_content"] == "enc-turn-1"
 
 
 def test_functions_dot_name_is_split_and_namespace_only_is_dropped():

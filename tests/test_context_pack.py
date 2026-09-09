@@ -34,20 +34,40 @@ def test_pack_keeps_current_user_and_latest_tool_batch():
     assert max(user_positions + tool_positions) >= min(user_positions)
 
 
-def test_pack_inserts_loss_notice_when_dropping_history(monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "context_window_tokens", 16000)
-    monkeypatch.setattr(settings, "compact_target_percent", 50)
-    monkeypatch.setattr(settings, "max_output_tokens", 8000)
+def test_pack_marks_needs_compact_instead_of_dropping(monkeypatch):
+    monkeypatch.setattr("app.context.windows.compact_threshold_tokens", lambda *args, **kwargs: 100)
     items = []
     for i in range(30):
         items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": ("history " + str(i) + " ") * 80}]})
     items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "latest"}]} )
-    turn = Turn(model="gpt-5.5", want_stream=True, client_api="responses", items=items, current_user="latest", catalog=build_catalog([], items))
+    turn = Turn(model="tiny-local", want_stream=True, client_api="responses", items=items, current_user="latest", catalog=build_catalog([], items))
     packed = pack_turn_items(turn)
-    assert packed.dropped_items > 0
-    assert any(LOSS_PREFIX in str(item) for item in packed.items)
+    assert packed.dropped_items == 0
+    assert packed.needs_compact is True
+    assert "latest" in str(packed.items)
+    assert "history 0" in str(packed.items)
+    assert any(LOSS_PREFIX in notice for notice in packed.notices)
+
+
+def test_pack_keeps_encrypted_reasoning():
+    items = [
+        {"type": "reasoning", "id": "rs_old", "encrypted_content": "enc-old", "summary": []},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        {"type": "function_call", "name": "js", "call_id": "c1", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": "tab locked"},
+    ]
+    turn = Turn(
+        model="gpt-5.5",
+        want_stream=True,
+        client_api="responses",
+        items=items,
+        current_user="continue",
+        catalog=build_catalog([], items),
+    )
+    packed = pack_turn_items(turn)
+    reasoning = [item for item in packed.items if item.get("type") == "reasoning"]
+    assert reasoning
+    assert reasoning[0]["encrypted_content"] == "enc-old"
 
 
 def test_pack_does_not_clip_long_tool_output():

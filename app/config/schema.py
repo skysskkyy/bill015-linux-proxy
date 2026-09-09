@@ -79,6 +79,7 @@ class LimitsConfig(StrictConfigModel):
     upstream_retries: int | None = None
     upstream_retry_backoff_ms: int | None = None
     context_window_tokens: int | None = None
+    model_context_windows: dict[str, int] | None = None
     auto_compact_percent: int | None = None
     compact_target_percent: int | None = None
     context_recovery_retries: int | None = None

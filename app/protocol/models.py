@@ -41,6 +41,8 @@ class ToolSpec:
     raw_type: str
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
+    examples: Any = None
+    format: dict[str, Any] | None = None
     core: bool = False
     proxy: bool = False
 
@@ -136,6 +138,7 @@ class Turn:
     image_replacements: int = 0
     loss_notices: list[str] = field(default_factory=list)
     web_intent: bool = False
+    event_sink: Any = None
 
 
 @dataclass
@@ -166,3 +169,6 @@ class TurnResult:
     verify_pre: dict[str, Any] | None = None
     verify_post: dict[str, Any] | None = None
     verify_delta: dict[str, Any] | None = None
+    reasoning_items: list[dict[str, Any]] = field(default_factory=list)
+    compacted_output: list[dict[str, Any]] = field(default_factory=list)
+    reasoning_live: bool = False

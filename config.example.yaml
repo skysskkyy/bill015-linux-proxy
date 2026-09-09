@@ -85,9 +85,10 @@ tool_bridge:
   catalog_max_chars: 120000
 
 multimodal:
-  # reject: fail explicitly; local_extract: strip bytes and disclose loss;
-  # native_passthrough: forward the image (may violate safe early-abort semantics).
-  strategy: reject
+  # native_passthrough: keep input_image parts on the wire.
+  # local_extract: strip bytes and leave a loss notice.
+  # reject: fail the request with 422.
+  strategy: native_passthrough
   max_images: 8
   max_image_bytes: 10485760
 

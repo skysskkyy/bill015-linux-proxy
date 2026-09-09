@@ -51,6 +51,11 @@ def _tool_name(tool: dict[str, Any], idx: int) -> str:
     name = _first_str(tool, NAME_KEYS)
     if name:
         return name
+    nested = tool.get("function")
+    if isinstance(nested, dict):
+        name = _first_str(nested, NAME_KEYS)
+        if name:
+            return name
     typ = str(tool.get("type") or "tool")
     return f"{typ}_{idx}"
 
@@ -100,6 +105,36 @@ def _is_core(name: str, namespace: str | None, description: str) -> bool:
     return any(token in blob for token in CORE_NAMES) or name.lower() in CORE_NAMES
 
 
+def _nested_function(tool: dict[str, Any]) -> dict[str, Any]:
+    nested = tool.get("function")
+    return nested if isinstance(nested, dict) else {}
+
+
+def _tool_parameters(tool: dict[str, Any]) -> dict[str, Any]:
+    nested = _nested_function(tool)
+    for source in (tool, nested):
+        for key in ("parameters", "input_schema", "json_schema"):
+            value = source.get(key)
+            if isinstance(value, dict) and value:
+                return value
+    return {}
+
+
+def _tool_examples(tool: dict[str, Any]) -> Any:
+    nested = _nested_function(tool)
+    for source in (tool, nested):
+        for key in ("examples", "example"):
+            value = source.get(key)
+            if value not in (None, "", []):
+                return value
+    return None
+
+
+def _tool_format(tool: dict[str, Any]) -> dict[str, Any] | None:
+    value = tool.get("format")
+    return value if isinstance(value, dict) else None
+
+
 def spec_from_tool(tool: dict[str, Any], idx: int) -> ToolSpec | None:
     if not isinstance(tool, dict):
         return None
@@ -109,8 +144,9 @@ def spec_from_tool(tool: dict[str, Any], idx: int) -> ToolSpec | None:
     if is_namespace_only(name, namespace_s) or not name:
         return None
     call_type, raw_type = _call_type(tool, name, namespace_s)
-    description = str(tool.get("description") or "")
-    parameters = tool.get("parameters") if isinstance(tool.get("parameters"), dict) else {}
+    nested = _nested_function(tool)
+    description = str(tool.get("description") or nested.get("description") or "")
+    parameters = _tool_parameters(tool)
     alias = name if not namespace_s else mcp_join(name, namespace_s)
     return ToolSpec(
         alias=alias,
@@ -120,6 +156,8 @@ def spec_from_tool(tool: dict[str, Any], idx: int) -> ToolSpec | None:
         raw_type=raw_type,
         description=description,
         parameters=parameters,
+        examples=_tool_examples(tool),
+        format=_tool_format(tool),
         core=_is_core(name, namespace_s, description),
     )
 
@@ -215,20 +253,26 @@ def build_catalog(
 
 
 def catalog_json(catalog: Catalog, cfg: Settings = settings) -> str:
+    _ = cfg
     rows = []
     for alias in catalog.selected:
         spec = catalog.specs.get(alias)
         if not spec:
             continue
-        rows.append(
-            {
-                "name": spec.name,
-                "namespace": spec.namespace,
-                "call_type": spec.call_type,
-                "description": spec.description[:400],
-            }
-        )
-    blob = json.dumps(rows, ensure_ascii=False)
-    if len(blob) > cfg.tool_bridge_catalog_max_chars:
-        blob = blob[: cfg.tool_bridge_catalog_max_chars] + "…"
-    return blob
+        row: dict[str, Any] = {
+            "name": spec.name,
+            "namespace": spec.namespace,
+            "call_type": spec.call_type,
+            "description": spec.description or "",
+        }
+        if spec.parameters:
+            row["parameters"] = spec.parameters
+            required = spec.parameters.get("required")
+            if required:
+                row["required"] = required
+        if spec.examples not in (None, "", []):
+            row["examples"] = spec.examples
+        if spec.format:
+            row["format"] = spec.format
+        rows.append(row)
+    return json.dumps(rows, ensure_ascii=False)

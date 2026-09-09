@@ -15,6 +15,7 @@ ITEM_ID_PREFIX = {
     "tool_search_output": "tso",
     "reasoning": "rs",
     "web_search_call": "ws",
+    "compaction": "cmp",
 }
 
 _KNOWN_PREFIXES = tuple(sorted({f"{p}_" for p in ITEM_ID_PREFIX.values()} | {"resp_local_", "call_"}, key=len, reverse=True))

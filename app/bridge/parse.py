@@ -7,7 +7,6 @@ from ..config import Settings, settings
 from ..protocol.models import BridgeToolCall, Catalog, WrapperCall, new_call_id
 from ..protocol.names import is_namespace_only, recover_tool_name, resolve_catalog_tool, split_tool_identity
 from .exec_source import is_code_mode_exec, normalize_exec_source, unwrap_exec_source
-from .progress import looks_like_progress
 
 
 def _load_object(raw: str) -> tuple[dict[str, Any], bool]:
@@ -148,12 +147,8 @@ def parse_emit_value(raw: str, catalog: Catalog, cfg: Settings = settings) -> Wr
                 calls.append(parsed)
     if calls:
         mode = "tool_call"
-    elif mode == "answer" and looks_like_progress(answer_text):
-        mode = "progress"
-    elif mode not in {"answer", "tool_call", "progress"}:
-        mode = "tool_call" if calls else "answer"
-    if mode == "answer":
-        calls = []
+    else:
+        mode = "answer"
     total = len(raw) + sum(len(call.arguments) + len(call.input) for call in calls)
     if total > cfg.max_total_emit_value_chars:
         return WrapperCall(mode="answer", answer=answer_text or "tool payload exceeded local integrity limit", tool_calls=[], raw_arguments=raw, malformed=True)

@@ -10,12 +10,13 @@ from fastapi import HTTPException
 
 from ..bridge.parse import parse_emit_value
 from ..bridge.payload import build_upstream_payload
-from ..bridge.progress import should_continue_progress
 from ..config import Settings, settings
+from ..context.compact import compact_history
 from ..context.pack import pack_turn_items
 from ..ingest.web_intent import local_web_preflight
 from ..ops.audit import redact
-from ..protocol.models import BridgeToolCall, Turn, TurnResult, WrapperCall, local_response_id, new_call_id
+from ..protocol.ids import make_item_id
+from ..protocol.models import BridgeToolCall, Turn, TurnResult, WrapperCall, local_response_id
 from ..protocol.sse import SSEEvent, parse_async_sse_lines
 from ..tools.loop import apply_proxy_tools, split_proxy_calls
 from .client import NATIVE_USER_AGENT, http_timeout, upstream_auth_headers
@@ -27,36 +28,85 @@ from .errors import (
 from .keys import upstream_key_pool
 
 
-def _progress_nudge(note: str) -> dict[str, Any]:
-    return {
-        "type": "message",
-        "role": "developer",
-        "content": [
-            {
-                "type": "input_text",
-                "text": (
-                    "[LOCAL TURN CONTINUATION] Previous emit_value was a progress note, not a final answer:\n"
-                    f"{note}\n"
-                    "Use mode=tool_call with local tools now. mode=answer only after the user request is fully handled."
-                ),
-            }
-        ],
+def finalize_visible_answer(result: TurnResult, *, did_local_work: bool = False) -> None:
+    if result.tool_calls:
+        return
+    if (result.answer or "").strip():
+        return
+    note = (result.commentary or "").strip()
+    if note:
+        result.answer = note
+    elif did_local_work:
+        result.answer = "The model ended this turn without a user-facing answer after local web research."
+
+
+def merge_reasoning_item(items: list[dict[str, Any]], item: dict[str, Any]) -> None:
+    if not isinstance(item, dict) or item.get("type") != "reasoning":
+        return
+    rid = str(item.get("id") or "") or make_item_id("reasoning")
+    summary = item.get("summary") if isinstance(item.get("summary"), list) else []
+    content = item.get("content") if isinstance(item.get("content"), list) else []
+    blob: dict[str, Any] = {
+        "id": rid,
+        "type": "reasoning",
+        "status": item.get("status") or "completed",
+        "summary": summary,
+        "content": content,
     }
+    encrypted = item.get("encrypted_content")
+    if isinstance(encrypted, str) and encrypted:
+        blob["encrypted_content"] = encrypted
+    for existing in items:
+        if existing.get("id") == rid:
+            if blob.get("encrypted_content"):
+                existing["encrypted_content"] = blob["encrypted_content"]
+            if summary:
+                existing["summary"] = summary
+            if content:
+                existing["content"] = content
+            if item.get("status"):
+                existing["status"] = item["status"]
+            return
+    items.append(blob)
 
 
-def _progress_fallback_call(turn: Turn) -> BridgeToolCall | None:
-    spec = turn.catalog.get("tool_search")
-    if spec is None or spec.call_type != "tool_search":
-        return None
-    query = (turn.current_user or "continue the current task").strip()[:200] or "continue the current task"
-    return BridgeToolCall(
-        id=new_call_id(),
-        name="tool_search",
-        arguments="",
-        call_type="tool_search",
-        execution="client",
-        search_arguments={"query": query, "limit": 12},
-    )
+def merge_reasoning_summary(
+    items: list[dict[str, Any]],
+    item_id: str,
+    *,
+    delta: str = "",
+    text: str | None = None,
+    summary_index: int = 0,
+) -> None:
+    rid = item_id or make_item_id("reasoning")
+    target = next((item for item in items if item.get("id") == rid), None)
+    if target is None:
+        target = {"id": rid, "type": "reasoning", "status": "in_progress", "summary": [], "content": []}
+        items.append(target)
+    summary = target.get("summary")
+    if not isinstance(summary, list):
+        summary = []
+        target["summary"] = summary
+    while len(summary) <= summary_index:
+        summary.append({"type": "summary_text", "text": ""})
+    part = summary[summary_index]
+    if not isinstance(part, dict):
+        part = {"type": "summary_text", "text": str(part)}
+        summary[summary_index] = part
+    if text is not None:
+        part["text"] = text
+    elif delta:
+        part["text"] = (part.get("text") or "") + delta
+
+
+def push_live(turn: Turn, event: dict[str, Any]) -> None:
+    sink = turn.event_sink
+    if sink is None:
+        return
+    try:
+        sink.put_nowait(event)
+    except Exception:
+        return
 
 
 def merge_wrappers(wrappers: list[WrapperCall]) -> tuple[str, str, list[BridgeToolCall], bool]:
@@ -66,16 +116,12 @@ def merge_wrappers(wrappers: list[WrapperCall]) -> tuple[str, str, list[BridgeTo
     malformed = False
     for wrapper in wrappers:
         malformed = malformed or wrapper.malformed
-        if wrapper.mode == "tool_call":
+        if wrapper.mode == "tool_call" and wrapper.tool_calls:
             tools.extend(wrapper.tool_calls)
             if wrapper.answer.strip():
                 commentary.append(wrapper.answer.strip())
-        elif wrapper.mode == "progress":
-            if wrapper.answer.strip():
-                commentary.append(wrapper.answer.strip())
-        else:
-            if wrapper.answer.strip():
-                answers.append(wrapper.answer.strip())
+        elif wrapper.answer.strip():
+            answers.append(wrapper.answer.strip())
     if tools:
         return "\n\n".join(answers), "\n\n".join(commentary), tools, malformed
     if answers:
@@ -101,9 +147,31 @@ def collect_from_events(events: Iterable[SSEEvent], turn: Turn, cfg: Settings = 
             result.upstream_response_id = response.get("id") or obj.get("id")
         elif typ == "response.output_item.added":
             item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
-            if item.get("name") == cfg.function_name or item.get("type") == "function_call":
+            if item.get("type") == "reasoning":
+                merge_reasoning_item(result.reasoning_items, item)
+            elif item.get("name") == cfg.function_name or item.get("type") == "function_call":
                 key = str(item.get("call_id") or item.get("id") or f"open-{len(open_calls)}")
                 open_calls.add(key)
+        elif typ == "response.output_item.done":
+            item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+            if item.get("type") == "reasoning":
+                merge_reasoning_item(result.reasoning_items, item)
+        elif typ == "response.reasoning_summary_text.delta":
+            delta = obj.get("delta") if isinstance(obj.get("delta"), str) else ""
+            merge_reasoning_summary(
+                result.reasoning_items,
+                str(obj.get("item_id") or ""),
+                delta=delta,
+                summary_index=int(obj.get("summary_index") or 0),
+            )
+        elif typ == "response.reasoning_summary_text.done":
+            text = obj.get("text") if isinstance(obj.get("text"), str) else None
+            merge_reasoning_summary(
+                result.reasoning_items,
+                str(obj.get("item_id") or ""),
+                text=text,
+                summary_index=int(obj.get("summary_index") or 0),
+            )
         elif typ == "response.function_call_arguments.delta":
             delta = obj.get("delta")
             if isinstance(delta, str):
@@ -125,6 +193,10 @@ def collect_from_events(events: Iterable[SSEEvent], turn: Turn, cfg: Settings = 
                 break
         elif typ == "response.completed":
             result.upstream_completed_seen = True
+            response = obj.get("response") if isinstance(obj.get("response"), dict) else {}
+            for item in response.get("output") or []:
+                if isinstance(item, dict):
+                    merge_reasoning_item(result.reasoning_items, item)
             if not wrappers and text_buf:
                 result.answer = "".join(text_buf)
             break
@@ -161,19 +233,13 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
     has_proxy_web = any(spec.proxy for spec in turn.catalog.specs.values())
     preflight = None
     if cfg.tool_bridge_local_web_research_preflight and not has_proxy_web:
-        preflight = local_web_research_preflight(turn.current_user, turn.catalog, turn.items)
+        preflight = local_web_preflight(turn.current_user, turn.catalog, turn.items)
     if preflight and not turn.is_compaction:
         result.tool_calls = [preflight]
         result.commentary = ""
         result.retry_reasons.append("local_web_research_preflight")
         result.duration_ms = int((time.perf_counter() - start) * 1000)
         return result
-
-    pack = pack_turn_items(turn, cfg)
-    result.packed_item_count = len(pack.items)
-    result.clipped_tool_output_count = pack.clipped_outputs
-    result.loss_notices = pack.notices
-    payload = build_upstream_payload(turn, cfg, packed_items=pack.items)
 
     selection = upstream_key_pool(cfg).current()
     if selection is None:
@@ -187,14 +253,38 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
     context_attempt = 0
     policy_rotations = 0
     proxy_rounds = 0
-    progress_rounds = 0
-    progress_notes: list[str] = []
     try:
         async with httpx.AsyncClient(timeout=http_timeout(cfg), headers={"User-Agent": NATIVE_USER_AGENT}) as client:
+            headers = upstream_auth_headers(api_key=selection.key, cfg=cfg, client_headers=turn.request_headers)
+            if turn.is_compaction:
+                compacted = await compact_history(client, headers, turn, [item for item in turn.items if isinstance(item, dict)], cfg)
+                if compacted is None:
+                    raise HTTPException(status_code=502, detail="upstream compact did not return output")
+                result.compacted_output = compacted
+                result.args_done_seen = True
+                result.retry_reasons.append("responses_compact")
+                return result
+
+            pack = pack_turn_items(turn, cfg)
+            if pack.needs_compact:
+                compacted = await compact_history(client, headers, turn, pack.items, cfg)
+                if compacted:
+                    turn.items = compacted
+                    pack = pack_turn_items(turn, cfg)
+                    result.compaction_count += 1
+                    result.retry_reasons.append("responses_compact")
+            turn.estimated_input_tokens = pack.tokens
+            result.packed_item_count = len(pack.items)
+            result.clipped_tool_output_count = pack.clipped_outputs
+            result.loss_notices = pack.notices
+            payload = build_upstream_payload(turn, cfg, packed_items=pack.items)
+
             while True:
                 headers = upstream_auth_headers(api_key=selection.key, cfg=cfg, client_headers=turn.request_headers)
                 buffers: dict[str, list[str]] = {}
                 open_calls: dict[str, float] = {}
+                reasoning_open: set[str] = set()
+                reasoning_items: list[dict[str, Any]] = []
                 wrappers: list[WrapperCall] = []
                 text_buf: list[str] = []
                 deadline = time.perf_counter() + max(1.0, cfg.args_done_timeout_ms / 1000)
@@ -206,7 +296,12 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                             body = await resp.aread()
                             detail = sanitize_upstream_error_detail(resp.status_code, body, content_type=resp.headers.get("content-type", ""))
                             if is_context_length_exceeded(body) and context_attempt < cfg.context_recovery_retries:
+                                compacted = await compact_history(client, headers, turn, [item for item in turn.items if isinstance(item, dict)], cfg)
+                                if compacted:
+                                    turn.items = compacted
+                                    result.retry_reasons.append("responses_compact")
                                 pack = pack_turn_items(turn, cfg, aggressive=True)
+                                turn.estimated_input_tokens = pack.tokens
                                 payload = build_upstream_payload(turn, cfg, packed_items=pack.items)
                                 context_attempt += 1
                                 result.compaction_count += 1
@@ -254,9 +349,39 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                                 result.upstream_response_id = response.get("id") or obj.get("id")
                             elif typ == "response.output_item.added":
                                 item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
-                                if item.get("name") == cfg.function_name or item.get("type") == "function_call":
+                                if item.get("type") == "reasoning":
+                                    key = str(item.get("id") or "")
+                                    if key:
+                                        reasoning_open.add(key)
+                                    merge_reasoning_item(reasoning_items, item)
+                                    current = next((row for row in reasoning_items if row.get("id") == (key or row.get("id"))), item)
+                                    push_live(turn, {"kind": "reasoning_added", "item": dict(current)})
+                                    result.reasoning_live = True
+                                elif item.get("name") == cfg.function_name or item.get("type") == "function_call":
                                     key = str(item.get("call_id") or item.get("id") or f"open-{len(open_calls)}")
                                     open_calls[key] = now
+                            elif typ == "response.output_item.done":
+                                item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+                                if item.get("type") == "reasoning":
+                                    merge_reasoning_item(reasoning_items, item)
+                                    reasoning_open.discard(str(item.get("id") or ""))
+                                    current = next((row for row in reasoning_items if row.get("id") == item.get("id")), item)
+                                    push_live(turn, {"kind": "reasoning_done", "item": dict(current)})
+                                    result.reasoning_live = True
+                            elif typ == "response.reasoning_summary_text.delta":
+                                delta = obj.get("delta") if isinstance(obj.get("delta"), str) else ""
+                                item_id = str(obj.get("item_id") or "")
+                                index = int(obj.get("summary_index") or 0)
+                                merge_reasoning_summary(reasoning_items, item_id, delta=delta, summary_index=index)
+                                push_live(turn, {"kind": "reasoning_summary_delta", "item_id": item_id, "delta": delta, "summary_index": index})
+                                result.reasoning_live = True
+                            elif typ == "response.reasoning_summary_text.done":
+                                item_id = str(obj.get("item_id") or "")
+                                index = int(obj.get("summary_index") or 0)
+                                text = obj.get("text") if isinstance(obj.get("text"), str) else None
+                                merge_reasoning_summary(reasoning_items, item_id, text=text, summary_index=index)
+                                push_live(turn, {"kind": "reasoning_summary_done", "item_id": item_id, "text": text or "", "summary_index": index})
+                                result.reasoning_live = True
                             elif typ == "response.function_call_arguments.delta":
                                 delta = obj.get("delta")
                                 if isinstance(delta, str):
@@ -272,12 +397,16 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                                 wrappers.append(parse_emit_value(raw, turn.catalog, cfg))
                                 open_calls.pop(key, None)
                                 result.args_done_seen = True
-                                if len(wrappers) >= cfg.max_emit_value_calls and not open_calls:
+                                if len(wrappers) >= cfg.max_emit_value_calls and not open_calls and not reasoning_open:
                                     await resp.aclose()
                                     result.aborted = True
                                     break
                             elif typ in {"response.completed", "response.incomplete"}:
                                 result.upstream_completed_seen = typ == "response.completed"
+                                response = obj.get("response") if isinstance(obj.get("response"), dict) else {}
+                                for item in response.get("output") or []:
+                                    if isinstance(item, dict):
+                                        merge_reasoning_item(reasoning_items, item)
                                 await resp.aclose()
                                 result.aborted = bool(wrappers)
                                 break
@@ -299,11 +428,12 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                                 raise RuntimeError(json.dumps(obj, ensure_ascii=False)[:2000])
 
                             quiet = cfg.emit_value_quiet_ms / 1000
-                            if wrappers and not open_calls and (now - last_event) >= quiet:
+                            if wrappers and not open_calls and not reasoning_open and (now - last_event) >= quiet:
                                 await resp.aclose()
                                 result.aborted = True
                                 break
 
+                        result.reasoning_items = reasoning_items
                         _apply_wrappers(result, wrappers)
                         if result.args_done_seen:
                             result.aborted = True
@@ -313,43 +443,22 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                                 proxy_rounds += 1
                                 result.retry_reasons.append(f"proxy_web:{','.join(c.name for c in proxy_calls)}")
                                 pack = pack_turn_items(turn, cfg)
+                                turn.estimated_input_tokens = pack.tokens
                                 payload = build_upstream_payload(turn, cfg, packed_items=pack.items)
                                 result.tool_calls = []
                                 result.answer = ""
                                 result.commentary = ""
                                 result.args_done_seen = False
+                                result.reasoning_items = []
                                 wrappers = []
                                 continue
                             result.tool_calls = client_calls
-                            if should_continue_progress(result) and progress_rounds < cfg.progress_continuation_rounds:
-                                note = (result.commentary or "").strip()
-                                if note:
-                                    progress_notes.append(note)
-                                    turn.items.append(_progress_nudge(note))
-                                progress_rounds += 1
-                                result.retry_reasons.append("progress_commentary")
-                                pack = pack_turn_items(turn, cfg)
-                                payload = build_upstream_payload(turn, cfg, packed_items=pack.items)
-                                result.packed_item_count = len(pack.items)
-                                result.tool_calls = []
-                                result.answer = ""
-                                result.commentary = ""
-                                result.args_done_seen = False
-                                wrappers = []
-                                continue
-                            if progress_notes:
-                                extra = (result.commentary or "").strip()
-                                result.commentary = "\n\n".join([item for item in [*progress_notes, extra] if item])
-                            if should_continue_progress(result):
-                                fallback = _progress_fallback_call(turn)
-                                if fallback is not None:
-                                    result.tool_calls = [fallback]
-                                    result.answer = ""
-                                    result.retry_reasons.append("progress_fallback_tool")
+                            finalize_visible_answer(result, did_local_work=bool(proxy_rounds))
                             break
                         if result.retry_reasons[-1:] == ["args_done_timeout"] and result.retry_count < cfg.stream_recovery_retries:
                             result.retry_count += 1
                             pack = pack_turn_items(turn, cfg, aggressive=True)
+                            turn.estimated_input_tokens = pack.tokens
                             payload = build_upstream_payload(turn, cfg, packed_items=pack.items)
                             continue
                         if not result.answer and text_buf:
@@ -390,6 +499,7 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
 
 def dry_run_response(turn: Turn, mode: str = "dry-run") -> dict[str, Any]:
     pack = pack_turn_items(turn)
+    turn.estimated_input_tokens = pack.tokens
     payload = build_upstream_payload(turn, packed_items=pack.items)
     safe = redact(payload)
     if not settings.store_prompts:
@@ -430,5 +540,9 @@ def audit_from_result(result: TurnResult, turn: Turn, mode: str) -> dict[str, An
         "packed_item_count": result.packed_item_count,
         "clipped_tool_output_count": result.clipped_tool_output_count,
         "prompt_chars": len(turn.current_user),
+        "answer_chars": len(result.answer or ""),
+        "commentary_chars": len(result.commentary or ""),
+        "reasoning_item_count": len(result.reasoning_items),
+        "compaction_count": result.compaction_count,
         "error": result.error,
     }

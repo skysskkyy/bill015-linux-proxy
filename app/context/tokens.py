@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Any
 
 from ..config import Settings, settings
+from .image_tokens import estimate_image_part, is_image_part
 
 _ENCODER = None
 _ENCODER_FAILED = False
@@ -44,6 +45,20 @@ def item_tokens(item: Any) -> int:
         return 0
     if isinstance(item, str):
         return count_text_tokens(item)
+    if isinstance(item, list):
+        return sum(item_tokens(part) for part in item)
+    if isinstance(item, dict):
+        if is_image_part(item):
+            return estimate_image_part(item)
+        total = 0
+        for key, value in item.items():
+            if key in {"image_url", "image"}:
+                continue
+            if key == "encrypted_content":
+                total += 32
+                continue
+            total += item_tokens(value)
+        return total
     try:
         blob = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
     except Exception:
@@ -59,8 +74,10 @@ def threshold_tokens(window: int, percent: int) -> int:
     return max(8_000, int(max(1, window) * max(1, min(percent, 99)) / 100))
 
 
-def pack_budget(cfg: Settings = settings, max_output_tokens: int | None = None) -> int:
+def pack_budget(cfg: Settings = settings, max_output_tokens: int | None = None, model: str | None = None) -> int:
+    from .windows import model_context_window
+
     reserved = int(max_output_tokens or cfg.max_output_tokens)
-    window = max(16_000, cfg.context_window_tokens)
+    window = model_context_window(model, cfg)
     target = threshold_tokens(window, cfg.compact_target_percent)
     return max(4_000, target - reserved)

@@ -11,11 +11,13 @@ def build_instructions(turn: Turn, cfg: Settings = settings) -> str:
         "You are Codex. Inspect before editing, plan multi-step work, verify results, and keep answers concise.",
         f"Return work by calling `{name}`. Do not write a normal assistant message outside that call.",
         "You may call it more than once this turn for independent local actions.",
-        f"Final answer: mode='answer', {cfg.answer_field}=<complete user-facing result>, tool_calls=[]. "
-        "Never use mode=answer for a progress note such as 'I will inspect…' or '我先检查…'.",
-        "Need a local tool: mode='tool_call'. Put a short progress note in answer only together with tool_calls.",
-        "Function tools: arguments is a JSON string matching that tool schema.",
-        "Freeform apply_patch: raw patch in input, arguments='{}'.",
+        f"Final answer: mode='answer', {cfg.answer_field}=<complete user-facing result>, tool_calls=[].",
+        "Need a local tool: mode='tool_call' with a non-empty tool_calls list. "
+        f"{cfg.answer_field} may be empty. If you include a short status note, put it in {cfg.answer_field} "
+        "in the same call as those tool_calls.",
+        "Function tools: arguments is a JSON object matching that tool's parameters "
+        "(field types, required fields, and examples). Do not stringify the object.",
+        "Freeform apply_patch: raw patch in input.",
         "Code-mode exec is an async JS module: send raw JavaScript, never JSON such as {\"input\":\"…\"}. "
         "Do not use a top-level return. Call text(value) or end with an expression so results are visible.",
         "tool_search: arguments is a JSON object {query, limit} with client-side execution.",
@@ -56,9 +58,9 @@ def build_instructions(turn: Turn, cfg: Settings = settings) -> str:
     if turn.loss_notices:
         parts.extend(turn.loss_notices)
     if turn.developer_text:
-        parts.append("Developer context:\n" + turn.developer_text[:8000])
+        parts.append("Developer context:\n" + turn.developer_text)
     if turn.system_text:
-        parts.append("System context:\n" + turn.system_text[:4000])
+        parts.append("System context:\n" + turn.system_text)
     if turn.instructions:
-        parts.append("Client instructions:\n" + turn.instructions[:4000])
+        parts.append("Client instructions:\n" + turn.instructions)
     return "\n\n".join(parts)

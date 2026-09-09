@@ -100,3 +100,32 @@ def test_image_reject_default(monkeypatch):
     )
     assert r.status_code == 422
     assert r.json()["error"]["message"]["code"] == "local_proxy_vision_unsupported"
+
+
+def test_image_passthrough_forwards_input_image(monkeypatch):
+    monkeypatch.setattr(settings, "multimodal_strategy", "native_passthrough")
+    monkeypatch.setattr(settings, "mode", "dry-run")
+    monkeypatch.setattr(settings, "store_prompts", True)
+    client = TestClient(app)
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    r = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-6-astra",
+            "stream": False,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {"type": "input_image", "image_url": f"data:image/png;base64,{png}"},
+                    ],
+                }
+            ],
+        },
+    )
+    assert r.status_code == 200
+    payload = r.json()["payload"]
+    assert png in str(payload["input"])
+    assert "LOCAL VISION NOTICE" not in str(payload["input"])

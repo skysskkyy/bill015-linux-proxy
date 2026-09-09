@@ -108,6 +108,19 @@ def _cfg_dict(path: str, default: dict[str, str]) -> dict[str, str]:
     return dict(default)
 
 
+def _cfg_int_dict(path: str, default: dict[str, int]) -> dict[str, int]:
+    val = _cfg(path, default)
+    if not isinstance(val, dict):
+        return dict(default)
+    out: dict[str, int] = {}
+    for key, raw in val.items():
+        try:
+            out[str(key)] = int(raw)
+        except Exception:
+            continue
+    return out
+
+
 def _cfg_list(path: str, default: list[str]) -> list[str]:
     val = _cfg(path, default)
     if isinstance(val, list):
@@ -177,7 +190,8 @@ class Settings:
     upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("PACKY_TIMEOUT_SECONDS", "upstream.timeout_seconds", 600.0))
     upstream_retries: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRIES", "limits.upstream_retries", 2))
     upstream_retry_backoff_ms: int = field(default_factory=lambda: _env_int("BILL015_UPSTREAM_RETRY_BACKOFF_MS", "limits.upstream_retry_backoff_ms", 700))
-    context_window_tokens: int = field(default_factory=lambda: _env_int("BILL015_CONTEXT_WINDOW_TOKENS", "limits.context_window_tokens", 128000))
+    context_window_tokens: int = field(default_factory=lambda: _env_int("BILL015_CONTEXT_WINDOW_TOKENS", "limits.context_window_tokens", 272000))
+    model_context_windows: dict[str, int] = field(default_factory=lambda: _cfg_int_dict("limits.model_context_windows", {}))
     auto_compact_percent: int = field(default_factory=lambda: _env_int("BILL015_AUTO_COMPACT_PERCENT", "limits.auto_compact_percent", 90))
     compact_target_percent: int = field(default_factory=lambda: _env_int("BILL015_COMPACT_TARGET_PERCENT", "limits.compact_target_percent", 75))
     context_recovery_retries: int = field(default_factory=lambda: _env_int("BILL015_CONTEXT_RECOVERY_RETRIES", "limits.context_recovery_retries", 2))
@@ -220,7 +234,7 @@ class Settings:
         default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_SELECTION_MAX_TOOLS", "tool_bridge.selection_max_tools", 160)
     )
     tool_bridge_catalog_max_chars: int = field(default_factory=lambda: _env_int("BILL015_TOOL_BRIDGE_CATALOG_MAX_CHARS", "tool_bridge.catalog_max_chars", 120000))
-    multimodal_strategy: str = field(default_factory=lambda: _env_str("BILL015_MULTIMODAL_STRATEGY", "multimodal.strategy", "reject").strip().lower())
+    multimodal_strategy: str = field(default_factory=lambda: _env_str("BILL015_MULTIMODAL_STRATEGY", "multimodal.strategy", "native_passthrough").strip().lower())
     multimodal_max_images: int = field(default_factory=lambda: _env_int("BILL015_MULTIMODAL_MAX_IMAGES", "multimodal.max_images", 8))
     multimodal_max_image_bytes: int = field(default_factory=lambda: _env_int("BILL015_MULTIMODAL_MAX_IMAGE_BYTES", "multimodal.max_image_bytes", 10485760))
     responses_chunk_size: int = field(default_factory=lambda: _env_int("BILL015_RESPONSES_CHUNK_SIZE", "responses_events.chunk_size", 256))
@@ -271,5 +285,5 @@ class Settings:
 settings = Settings()
 settings.validate_mode()
 if settings.multimodal_strategy not in {"reject", "local_extract", "native_passthrough"}:
-    settings.multimodal_strategy = "reject"
+    settings.multimodal_strategy = "native_passthrough"
 settings.config_warnings = CONFIG_WARNINGS

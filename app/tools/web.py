@@ -28,6 +28,7 @@ WEB_SEARCH_SPEC = ToolSpec(
         },
         "required": ["query"],
     },
+    examples=[{"query": "site:example.com latest news", "limit": 5}],
     core=True,
     proxy=True,
 )
@@ -51,6 +52,7 @@ WEB_EXTRACT_SPEC = ToolSpec(
         },
         "required": ["urls"],
     },
+    examples=[{"urls": ["https://example.com"], "format": "markdown"}],
     core=True,
     proxy=True,
 )

@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from app.bridge.exec_source import is_code_mode_exec, normalize_exec_source, unwrap_exec_source
 from app.bridge.parse import parse_emit_value
-from app.bridge.progress import looks_like_progress, should_continue_progress
 from app.ingest.catalog import build_catalog
 from app.protocol.models import TurnResult
-from app.upstream.execute import merge_wrappers
+from app.upstream.execute import finalize_visible_answer, merge_wrappers
 
 
 def test_unwrap_json_input_and_fences():
@@ -56,31 +55,42 @@ def test_parse_exec_json_wrapper_becomes_raw_js():
     assert call.input.strip()[0] != "{"
 
 
-def test_progress_note_is_not_final_answer():
+def test_status_note_rides_with_tools():
     catalog = build_catalog([{"type": "function", "name": "shell_command"}, {"type": "tool_search", "name": "tool_search"}], [])
-    text = (
-        "\u6211\u5148\u5feb\u901f\u68c0\u67e5\u9879\u76ee\u7ed3\u6784\u3001"
-        "\u8bf4\u660e\u6587\u4ef6\u548c\u5f53\u524d\u72b6\u6001\uff0c"
-        "\u518d\u7ed9\u4f60\u4e00\u4e2a\u7b80\u660e\u6982\u89c8\u3002"
-    )
-    assert looks_like_progress(text)
-    assert looks_like_progress("I'll inspect the project files, then give you a short overview.")
     wrapper = parse_emit_value(
-        '{"mode":"answer","answer":"' + text + '","tool_calls":[]}',
+        '{"mode":"tool_call","answer":"\u6211\u5148\u6253\u5f00 Chrome","tool_calls":[{"type":"function","name":"shell_command","arguments":"{\\"command\\":\\"pwd\\"}"}]}',
         catalog,
     )
-    assert wrapper.mode == "progress"
+    assert wrapper.mode == "tool_call"
     answer, commentary, tools, _ = merge_wrappers([wrapper])
     assert answer == ""
-    assert text in commentary
-    assert tools == []
-    result = TurnResult(local_request_id="x", commentary=commentary, answer=answer, tool_calls=tools)
-    assert should_continue_progress(result)
-    real = parse_emit_value(
-        '{"mode":"answer","answer":"\u9879\u76ee\u7528\u9014\u662f\u8ba1\u7b97\u822a\u9053\u3002","tool_calls":[]}',
+    assert "Chrome" in commentary
+    assert tools
+    lone = parse_emit_value(
+        '{"mode":"answer","answer":"\u6211\u5148\u68c0\u67e5\u9879\u76ee\u7ed3\u6784\u3002","tool_calls":[]}',
         catalog,
     )
-    assert real.mode == "answer"
+    assert lone.mode == "answer"
+    assert lone.tool_calls == []
+    silent = parse_emit_value(
+        '{"mode":"tool_call","tool_calls":[{"type":"function","name":"shell_command","arguments":"{\\"command\\":\\"pwd\\"}"}]}',
+        catalog,
+    )
+    assert silent.mode == "tool_call"
+    assert silent.answer == ""
+    assert silent.tool_calls
+
+
+def test_finalize_promotes_commentary_when_answer_empty():
+    result = TurnResult(local_request_id="x", answer="", commentary="我先搜索再整理。")
+    finalize_visible_answer(result, did_local_work=True)
+    assert result.answer == "我先搜索再整理。"
+    empty = TurnResult(local_request_id="y", answer="", commentary="")
+    finalize_visible_answer(empty, did_local_work=True)
+    assert "without a user-facing answer" in empty.answer
+    kept = TurnResult(local_request_id="z", answer="葛饰区推荐三家店。", commentary="searching")
+    finalize_visible_answer(kept, did_local_work=True)
+    assert kept.answer == "葛饰区推荐三家店。"
 
 
 def test_answer_with_tools_keeps_tools():

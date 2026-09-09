@@ -12,7 +12,7 @@ This project uses local Git version control.
 Current version:
 
 ```text
-0.5.1
+0.5.3
 ```
 
 ## Required workflow for every modification

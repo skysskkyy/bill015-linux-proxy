@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import Settings, settings
+from ..context.image_tokens import is_image_part
 
 VISION_NOTICE = (
     "[LOCAL VISION NOTICE] This proxy did not inspect image bytes. "
@@ -15,8 +16,7 @@ def _walk_replace(value: Any, *, replacements: list[int], cfg: Settings) -> Any:
         return [_walk_replace(item, replacements=replacements, cfg=cfg) for item in value]
     if not isinstance(value, dict):
         return value
-    typ = str(value.get("type") or "")
-    if typ in {"input_image", "image_url", "output_image"} or "image_url" in value or value.get("image"):
+    if is_image_part(value):
         replacements[0] += 1
         if cfg.multimodal_strategy == "native_passthrough":
             return value

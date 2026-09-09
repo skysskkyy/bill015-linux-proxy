@@ -269,7 +269,7 @@ async def responses_compact(request: Request):
                 raise HTTPException(status_code=409, detail="safe bridge policy blocked normal compact forwarding")
             mode = "exploit"
         result = await run_and_record(turn, mode)
-    return JSONResponse(compact_output(result))
+    return JSONResponse(compact_output(result, turn))
 
 
 @app.post("/v1/chat/completions")

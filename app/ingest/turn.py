@@ -4,11 +4,29 @@ import json
 from typing import Any
 
 from ..config import Settings, settings
+from ..context.image_tokens import is_image_part
 from ..protocol.models import Turn
 from .catalog import build_catalog
 from .images import sanitize_images
 from .text import flatten_content, item_text, last_user_text
 from .web_intent import detect_web_intent
+
+
+def _chat_content_parts(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+    if isinstance(content, list):
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if isinstance(part, dict) and is_image_part(part):
+                parts.append(part)
+                continue
+            text = flatten_content(part)
+            if text:
+                parts.append({"type": "input_text", "text": text})
+        return parts or [{"type": "input_text", "text": ""}]
+    text = flatten_content(content)
+    return [{"type": "input_text", "text": text}]
 
 
 def _as_items(value: Any) -> list[Any]:
@@ -153,7 +171,7 @@ def normalize_chat_request(body: dict[str, Any], request_headers: dict[str, str]
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role") or "user")
-        items.append({"type": "message", "role": role, "content": [{"type": "input_text", "text": flatten_content(msg.get("content"))}]})
+        items.append({"type": "message", "role": role, "content": _chat_content_parts(msg.get("content"))})
     current_user = last_user_text(items)
     catalog = build_catalog(cleaned.get("tools"), items, query=current_user, cfg=cfg)
     return Turn(
