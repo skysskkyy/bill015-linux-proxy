@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from ..config import Settings, settings
+from ..ingest.text import rewrite_encrypted_content_parts
 from ..protocol.ids import make_item_id
 from ..protocol.models import Turn
 from .pack import _latest_tool_batch, _latest_user_index
@@ -85,7 +86,7 @@ async def compact_history(
     url = cfg.upstream_base_url.rstrip("/") + "/v1/responses/compact"
     payload = {
         "model": turn.model,
-        "input": items,
+        "input": rewrite_encrypted_content_parts(items),
         "store": False,
         "stream": False,
     }

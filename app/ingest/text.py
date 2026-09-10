@@ -9,7 +9,7 @@ def flatten_content(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, dict):
-        for key in ("text", "output_text", "input", "content", "output"):
+        for key in ("text", "output_text", "input", "content", "output", "encrypted_content"):
             if key in content:
                 return flatten_content(content.get(key))
         return ""
@@ -17,6 +17,32 @@ def flatten_content(content: Any) -> str:
         parts = [flatten_content(part) for part in content]
         return "\n".join(part for part in parts if part)
     return str(content)
+
+
+def rewrite_encrypted_content_parts(value: Any) -> Any:
+    if isinstance(value, list):
+        changed = False
+        out: list[Any] = []
+        for part in value:
+            rewritten = rewrite_encrypted_content_parts(part)
+            changed = changed or rewritten is not part
+            out.append(rewritten)
+        return out if changed else value
+    if not isinstance(value, dict):
+        return value
+    if str(value.get("type") or "") == "encrypted_content":
+        text = value.get("text")
+        if not isinstance(text, str) or not text:
+            raw = value.get("encrypted_content")
+            text = raw if isinstance(raw, str) else ""
+        return {"type": "input_text", "text": text}
+    changed = False
+    out: dict[str, Any] = {}
+    for key, nested in value.items():
+        rewritten = rewrite_encrypted_content_parts(nested)
+        changed = changed or rewritten is not nested
+        out[key] = rewritten
+    return out if changed else value
 
 
 def item_type(item: Any) -> str:

@@ -75,6 +75,41 @@ def test_tool_search_output_extends_catalog():
     assert "create_thread" in catalog.specs
 
 
+def test_agent_message_encrypted_content_becomes_input_text():
+    body = {
+        "model": "gpt-6-astra",
+        "input": [
+            {
+                "type": "agent_message",
+                "id": "amsg_01a085d6-ef98-7282-9c83-61f73ca62a45",
+                "author": "/root",
+                "recipient": "/root/research_ue5_mcp",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Message Type: NEW_TASK\nTask name: /root/research_ue5_mcp\nSender: /root\nPayload:\n",
+                    },
+                    {
+                        "type": "encrypted_content",
+                        "encrypted_content": "Research suitable established open-source UE5 MCP implementations.",
+                    },
+                ],
+            }
+        ],
+    }
+    turn = normalize_responses_request(body)
+    item = turn.items[0]
+    assert item["type"] == "agent_message"
+    parts = item["content"]
+    assert parts[0]["type"] == "input_text"
+    assert parts[1] == {
+        "type": "input_text",
+        "text": "Research suitable established open-source UE5 MCP implementations.",
+    }
+    assert "encrypted_content" not in str(parts)
+    assert "Research suitable established" in turn.current_user
+
+
 def test_compact_endpoint_returns_output_items(monkeypatch):
     monkeypatch.setattr("app.config.settings.mode", "dry-run")
     client = TestClient(app)

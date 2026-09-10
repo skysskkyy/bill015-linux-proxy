@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import Settings, settings
-from ..ingest.text import item_text, item_type
+from ..ingest.text import item_text, item_type, rewrite_encrypted_content_parts
 from ..protocol.ids import coerce_item_id
 from ..protocol.models import TOOL_CALL_TYPES, TOOL_OUTPUT_TYPES, Turn
 from .tokens import items_tokens, threshold_tokens
@@ -62,7 +62,7 @@ def pack_turn_items(turn: Turn, cfg: Settings = settings, *, aggressive: bool = 
     items = [item for item in turn.items if isinstance(item, dict)]
     last_cmp = _last_compaction_index(items)
     kept = items[last_cmp:] if last_cmp is not None else list(items)
-    packed = [coerce_item_id(dict(item)) for item in kept]
+    packed = [coerce_item_id(rewrite_encrypted_content_parts(dict(item))) for item in kept]
     used = items_tokens(packed)
     threshold = compact_threshold_tokens(turn.model, cfg)
     if aggressive:

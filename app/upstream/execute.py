@@ -21,8 +21,11 @@ from ..protocol.sse import SSEEvent, parse_async_sse_lines
 from ..tools.loop import apply_proxy_tools, split_proxy_calls
 from .client import NATIVE_USER_AGENT, http_timeout, upstream_auth_headers
 from .errors import (
+    RATE_LIMIT_RETRIES,
+    RATE_LIMIT_RETRY_DELAY_SECONDS,
     is_context_length_exceeded,
     key_rotation_error_reason,
+    retryable_upstream_error_reason,
     sanitize_upstream_error_detail,
 )
 from .keys import upstream_key_pool
@@ -253,6 +256,8 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
     context_attempt = 0
     policy_rotations = 0
     proxy_rounds = 0
+    rate_limit_attempts = 0
+    rate_limit_cap = max(0, RATE_LIMIT_RETRIES)
     try:
         async with httpx.AsyncClient(timeout=http_timeout(cfg), headers={"User-Agent": NATIVE_USER_AGENT}) as client:
             headers = upstream_auth_headers(api_key=selection.key, cfg=cfg, client_headers=turn.request_headers)
@@ -287,6 +292,7 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                 reasoning_items: list[dict[str, Any]] = []
                 wrappers: list[WrapperCall] = []
                 text_buf: list[str] = []
+                rate_limited = False
                 deadline = time.perf_counter() + max(1.0, cfg.args_done_timeout_ms / 1000)
                 last_event = time.perf_counter()
                 attempt_events = len(result.event_sequence)
@@ -295,6 +301,13 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                         if resp.status_code != 200:
                             body = await resp.aread()
                             detail = sanitize_upstream_error_detail(resp.status_code, body, content_type=resp.headers.get("content-type", ""))
+                            retry_reason = retryable_upstream_error_reason(body)
+                            if retry_reason and rate_limit_attempts < rate_limit_cap:
+                                rate_limit_attempts += 1
+                                result.retry_count += 1
+                                result.retry_reasons.append(retry_reason)
+                                await asyncio.sleep(RATE_LIMIT_RETRY_DELAY_SECONDS)
+                                continue
                             if is_context_length_exceeded(body) and context_attempt < cfg.context_recovery_retries:
                                 compacted = await compact_history(client, headers, turn, [item for item in turn.items if isinstance(item, dict)], cfg)
                                 if compacted:
@@ -411,6 +424,20 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                                 result.aborted = bool(wrappers)
                                 break
                             elif typ in {"response.failed", "error"}:
+                                retry_reason = retryable_upstream_error_reason(obj)
+                                if retry_reason:
+                                    await resp.aclose()
+                                    if rate_limit_attempts < rate_limit_cap:
+                                        rate_limit_attempts += 1
+                                        result.retry_count += 1
+                                        result.retry_reasons.append(retry_reason)
+                                        rate_limited = True
+                                        wrappers = []
+                                        break
+                                    raise HTTPException(
+                                        status_code=502,
+                                        detail=sanitize_upstream_error_detail(503, obj),
+                                    )
                                 reason = key_rotation_error_reason(obj)
                                 if reason and cfg.cyber_policy_rotate:
                                     await resp.aclose()
@@ -433,6 +460,13 @@ async def execute_turn(turn: Turn, mode: str = "exploit", cfg: Settings = settin
                                 result.aborted = True
                                 break
 
+                        if rate_limited:
+                            result.args_done_seen = False
+                            result.tool_calls = []
+                            result.answer = ""
+                            result.commentary = ""
+                            await asyncio.sleep(RATE_LIMIT_RETRY_DELAY_SECONDS)
+                            continue
                         result.reasoning_items = reasoning_items
                         _apply_wrappers(result, wrappers)
                         if result.args_done_seen:

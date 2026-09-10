@@ -38,6 +38,35 @@ def test_dry_run_responses(monkeypatch):
     assert names == ["emit_value"]
 
 
+def test_dry_run_rewrites_agent_message_encrypted_content(monkeypatch):
+    monkeypatch.setattr(settings, "mode", "dry-run")
+    client = TestClient(app)
+    r = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-6-astra",
+            "stream": False,
+            "input": [
+                {
+                    "type": "agent_message",
+                    "id": "amsg_1",
+                    "author": "/root",
+                    "recipient": "/root/child",
+                    "content": [
+                        {"type": "input_text", "text": "Payload:\n"},
+                        {"type": "encrypted_content", "encrypted_content": "Do the child task."},
+                    ],
+                }
+            ],
+        },
+    )
+    assert r.status_code == 200
+    payload = r.json()["payload"]
+    agent = next(item for item in payload["input"] if item.get("type") == "agent_message")
+    assert agent["content"][1] == {"type": "input_text", "text": "Do the child task."}
+    assert '"type": "encrypted_content"' not in json.dumps(payload["input"])
+
+
 def test_upstream_headers_look_like_codex():
     from app.upstream.client import NATIVE_ORIGINATOR, NATIVE_USER_AGENT, upstream_auth_headers
 

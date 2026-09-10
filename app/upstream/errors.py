@@ -15,6 +15,10 @@ CYBER_POLICY_ERROR_MESSAGE = (
     "To get authorized for security work, join the Trusted Access for Cyber program: "
     "https://chatgpt.com/cyber"
 )
+RATE_LIMIT_EXCEEDED_CODE = "rate_limit_exceeded"
+SERVER_ERROR_CODE = "server_error"
+RATE_LIMIT_RETRY_DELAY_SECONDS = 2.0
+RATE_LIMIT_RETRIES = 8
 
 
 def _reason(status: int) -> str:
@@ -92,6 +96,40 @@ def is_cyber_policy_rotation_error(payload: Any) -> bool:
 def key_rotation_error_reason(payload: Any) -> str | None:
     if is_cyber_policy_rotation_error(payload):
         return "cyber_policy"
+    return None
+
+
+def is_rate_limit_exceeded(payload: Any) -> bool:
+    code, message = _error_fields(payload)
+    if code == RATE_LIMIT_EXCEEDED_CODE:
+        return True
+    text = f"{code} {message}".lower()
+    return RATE_LIMIT_EXCEEDED_CODE in text
+
+
+def is_server_error(payload: Any) -> bool:
+    code, _message = _error_fields(payload)
+    if code == SERVER_ERROR_CODE:
+        return True
+    parsed: Any = payload
+    if isinstance(parsed, bytes):
+        parsed = _decode(parsed)
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except Exception:
+            return False
+    if not isinstance(parsed, dict):
+        return False
+    err = parsed.get("error") if isinstance(parsed.get("error"), dict) else parsed
+    return isinstance(err, dict) and str(err.get("type") or "") == SERVER_ERROR_CODE
+
+
+def retryable_upstream_error_reason(payload: Any) -> str | None:
+    if is_rate_limit_exceeded(payload):
+        return "rate_limit_exceeded"
+    if is_server_error(payload):
+        return "server_error"
     return None
 
 

@@ -8,7 +8,7 @@ from ..context.image_tokens import is_image_part
 from ..protocol.models import Turn
 from .catalog import build_catalog
 from .images import sanitize_images
-from .text import flatten_content, item_text, last_user_text
+from .text import flatten_content, item_text, last_user_text, rewrite_encrypted_content_parts
 from .web_intent import detect_web_intent
 
 
@@ -126,6 +126,7 @@ def normalize_responses_request(body: dict[str, Any], request_headers: dict[str,
     cleaned, image_replacements = sanitize_images(body, cfg)
     items = _as_items(cleaned.get("input"))
     typed_items, extra_dev = _strip_additional_tools(items)
+    typed_items = [rewrite_encrypted_content_parts(item) for item in typed_items]
     system_text, developer_text = _role_texts(typed_items)
     if extra_dev:
         developer_text = (developer_text + "\n" + extra_dev).strip()

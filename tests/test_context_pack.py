@@ -49,6 +49,35 @@ def test_pack_marks_needs_compact_instead_of_dropping(monkeypatch):
     assert any(LOSS_PREFIX in notice for notice in packed.notices)
 
 
+def test_pack_rewrites_agent_message_encrypted_content():
+    items = [
+        {
+            "type": "agent_message",
+            "id": "amsg_child",
+            "author": "/root",
+            "recipient": "/root/build_check",
+            "content": [
+                {"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\n"},
+                {"type": "encrypted_content", "encrypted_content": "Inspect Build.bat only."},
+            ],
+        },
+        {"type": "reasoning", "id": "rs_keep", "encrypted_content": "gAAAAA-fernet-blob", "summary": []},
+    ]
+    turn = Turn(
+        model="gpt-6-astra",
+        want_stream=True,
+        client_api="responses",
+        items=items,
+        current_user="Inspect Build.bat only.",
+        catalog=build_catalog([], items),
+    )
+    packed = pack_turn_items(turn)
+    agent = next(item for item in packed.items if item.get("type") == "agent_message")
+    reasoning = next(item for item in packed.items if item.get("type") == "reasoning")
+    assert agent["content"][1] == {"type": "input_text", "text": "Inspect Build.bat only."}
+    assert reasoning["encrypted_content"] == "gAAAAA-fernet-blob"
+
+
 def test_pack_keeps_encrypted_reasoning():
     items = [
         {"type": "reasoning", "id": "rs_old", "encrypted_content": "enc-old", "summary": []},
