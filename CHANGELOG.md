@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Forward Codex compaction requests received on `/v1/responses` to the same upstream endpoint with the original body and native headers, returning upstream response bytes and HTTP status directly. Keep explicit `/v1/responses/compact` handling separate.
+- Keep passthrough compaction connections under the existing concurrency and total-timeout limits and release them on disconnect or failure.
+
 ## [0.5.3] - 2026-09-09
 
 ### Changed

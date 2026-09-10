@@ -19,6 +19,7 @@ from .protocol.models import Turn, TurnResult, local_response_id
 from .replay import chat_json, chat_sse_generator, compact_output, response_json, responses_sse_generator
 from .upstream import audit_from_result, dry_run_response, execute_turn, upstream_key_pool
 from .upstream.client import codex_request_headers
+from .upstream.passthrough import CompactionPassthroughResponse, is_responses_compaction
 
 
 def project_version() -> str:
@@ -65,6 +66,7 @@ async def read_json_body(request: Request) -> dict[str, Any]:
         if len(body) + len(chunk) > limit:
             raise HTTPException(status_code=413, detail="request body too large")
         body.extend(chunk)
+    request.state.raw_json_body = bytes(body)
     if not body:
         return {}
     try:
@@ -189,14 +191,22 @@ async def models() -> dict[str, Any]:
     }
 
 
-async def handle_responses_body(body: dict[str, Any], request_headers: dict[str, str] | None = None):
+async def handle_responses_body(
+    body: dict[str, Any], request_headers: dict[str, str] | None = None, *, raw_body: bytes | None = None
+):
+    mode = active_mode()
+    if mode == "circuit-open":
+        raise HTTPException(status_code=503, detail="circuit breaker open after consecutive upstream failures")
+    # Compaction metadata describes the operation, not a request to change endpoints.
+    # Keep this before normalization so native input, tools, and instructions survive.
+    if mode != "dry-run" and is_responses_compaction(body, request_headers):
+        return CompactionPassthroughResponse(
+            body, request_headers, raw_body=raw_body, mode=mode, limiter=capacity_limiter
+        )
     try:
         turn = normalize_responses_request(body, request_headers=codex_request_headers(request_headers))
     except ValueError as e:
         raise HTTPException(status_code=422, detail={"code": "local_proxy_vision_unsupported", "message": str(e)}) from e
-    mode = active_mode()
-    if mode == "circuit-open":
-        raise HTTPException(status_code=503, detail="circuit breaker open after consecutive upstream failures")
     if mode == "dry-run":
         dry = dry_run_response(turn)
         if turn.want_stream:
@@ -235,7 +245,8 @@ async def handle_responses_body(body: dict[str, Any], request_headers: dict[str,
 
 @app.post("/v1/responses")
 async def responses(request: Request):
-    return await handle_responses_body(await read_json_body(request), dict(request.headers))
+    body = await read_json_body(request)
+    return await handle_responses_body(body, dict(request.headers), raw_body=request.state.raw_json_body)
 
 
 @app.post("/v1/responses/compact")
